@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quiz-ingest-vllm"
+version = "0.1.0"
+description = "Document ingestion -> multiple-choice quiz generation, running entirely on a self-hosted vLLM GPU instance (Vast.ai), with per-stage TTFT/decode-tps telemetry and 3 reference-free eval metrics."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "rank_bm25>=0.2.2",
+    "pypdf>=4.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+# Only needed once you move from a plain rented instance to a Vast Serverless
+# endpoint -- see llm/vast_serverless_client.py. Not required for the
+# instance-mode path this repo defaults to.
+serverless = ["vastai>=0.1.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

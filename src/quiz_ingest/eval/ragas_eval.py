@@ -1,0 +1,140 @@
+"""
+eval/ragas_eval.py
+
+RAGAS Faithfulness (Es et al., EACL 2024, aclanthology.org/2024.eacl-demo.16)
+and Answer Relevance (same paper, Eq. 1) -- definitions unchanged from the
+original paper, only the batching of LLM calls is this repo's contribution.
+
+Faithfulness: decompose the answer into atomic statements, then verify
+each statement against the source context. Both steps batched: B
+questions/call instead of 1/call.
+
+Answer Relevance: generate 3 reverse-questions per answer (all B*3
+reverse-questions generated in ONE call, not one call per question), embed
+the original question + all reverse-questions in ONE batched embed() call,
+then cosine-similarity average.
+
+CRITICAL: a question whose batch JSON failed to parse must be EXCLUDED
+from the returned scores, not silently scored 0.0 -- 0.0 is a real
+(terrible) faithfulness score, and conflating "the model failed to
+produce parseable output" with "the model produced a genuinely
+unfaithful answer" made SLM-vs-Gemini quality comparisons untrustworthy
+in the project this repo is descended from. `score_batch()`'s return
+type makes the distinction explicit via `excluded_indices`.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from quiz_ingest.generation.batch_quiz_gen import QuizItem
+from quiz_ingest.llm.base import LLMBackend
+
+_STATEMENT_SCHEMA = '{"index": <int>, "statements": [<string>, ...]}'
+_VERIFY_SCHEMA = '{"index": <int>, "verdicts": [<0 or 1 per statement, in order>]}'
+_REVERSE_Q_SCHEMA = '{"index": <int>, "reverse_questions": [<string>, <string>, <string>]}'
+
+
+@dataclass
+class EvalScores:
+    faithfulness: dict[int, float]  # keyed by QuizItem.index
+    answer_relevance: dict[int, float]
+    excluded_indices: set[int]  # parse failures at ANY step -- excluded from both dicts above
+
+
+async def score_faithfulness_and_relevance(
+    backend: LLMBackend, *, shared_prefix: str, items: list[QuizItem]
+) -> EvalScores:
+    excluded: set[int] = set()
+
+    # --- Faithfulness: decompose ---
+    decompose_prompts = [
+        f"Break this answer into atomic factual statements: \"{it.correct_answer}\""
+        for it in items
+    ]
+    decompose_result = await backend.generate_json_batch(
+        shared_prefix=shared_prefix,
+        item_prompts=decompose_prompts,
+        schema_hint=_STATEMENT_SCHEMA,
+        max_tokens=150 * len(items),
+    )
+    excluded |= {items[i].index for i in decompose_result.parse_failures}
+    statements_by_index = {
+        items[i].index: obj.get("statements", [])
+        for i, obj in enumerate(decompose_result.items)
+        if i not in decompose_result.parse_failures
+    }
+
+    # --- Faithfulness: verify each statement against supporting_fact ---
+    verify_prompts = [
+        f"Statements: {statements_by_index.get(it.index, [])}\n"
+        f"Source fact: \"{it.supporting_fact}\"\n"
+        f"For each statement, is it directly supported by the source fact? "
+        f"1 = yes, 0 = no."
+        for it in items
+        if it.index in statements_by_index
+    ]
+    verify_items_order = [it for it in items if it.index in statements_by_index]
+    faithfulness: dict[int, float] = {}
+    if verify_prompts:
+        verify_result = await backend.generate_json_batch(
+            shared_prefix=shared_prefix,
+            item_prompts=verify_prompts,
+            schema_hint=_VERIFY_SCHEMA,
+            max_tokens=100 * len(verify_prompts),
+        )
+        excluded |= {verify_items_order[i].index for i in verify_result.parse_failures}
+        for i, obj in enumerate(verify_result.items):
+            if i in verify_result.parse_failures:
+                continue
+            it = verify_items_order[i]
+            verdicts = obj.get("verdicts", [])
+            if verdicts:
+                faithfulness[it.index] = sum(verdicts) / len(verdicts)
+
+    # --- Answer Relevance: reverse-questions in ONE call for the whole group ---
+    reverse_prompts = [
+        f"Given this answer, write 3 questions it could be answering: \"{it.correct_answer}\""
+        for it in items
+    ]
+    reverse_result = await backend.generate_json_batch(
+        shared_prefix=shared_prefix,
+        item_prompts=reverse_prompts,
+        schema_hint=_REVERSE_Q_SCHEMA,
+        max_tokens=100 * len(items),
+    )
+    excluded |= {items[i].index for i in reverse_result.parse_failures}
+
+    # Build ONE embed() call for original questions + all reverse-questions
+    valid_pairs = [
+        (items[i].index, items[i].question, obj.get("reverse_questions", []))
+        for i, obj in enumerate(reverse_result.items)
+        if i not in reverse_result.parse_failures and obj.get("reverse_questions")
+    ]
+    answer_relevance: dict[int, float] = {}
+    if valid_pairs:
+        all_texts: list[str] = []
+        spans: list[tuple[int, int, int]] = []  # (item_index, orig_pos, n_reverse)
+        for item_index, orig_q, reverse_qs in valid_pairs:
+            orig_pos = len(all_texts)
+            all_texts.append(orig_q)
+            all_texts.extend(reverse_qs)
+            spans.append((item_index, orig_pos, len(reverse_qs)))
+
+        vectors, _telemetry = await backend.embed(all_texts)
+        vecs = np.array(vectors)
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
+        unit_vecs = vecs / norms
+
+        for item_index, orig_pos, n_reverse in spans:
+            if n_reverse == 0:
+                continue
+            orig_vec = unit_vecs[orig_pos]
+            reverse_vecs = unit_vecs[orig_pos + 1 : orig_pos + 1 + n_reverse]
+            sims = reverse_vecs @ orig_vec
+            answer_relevance[item_index] = float(np.mean(sims))
+
+    return EvalScores(
+        faithfulness=faithfulness, answer_relevance=answer_relevance, excluded_indices=excluded
+    )
