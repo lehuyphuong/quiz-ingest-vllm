@@ -224,6 +224,34 @@ with a gap in the middle), check this first -- it was previously
 indistinguishable from "the model just decided not to answer," with no
 diagnostic path at all.
 
+## Cross-group question dedup
+
+`num_questions` gets split into groups of at most `batch_size` (see
+`generation/batch_quiz_gen.py::QUESTION_BATCH_SIZE`) -- each group is a
+separate, stateless LLM call. Against the same context, two separate
+calls can independently pick the same most-salient fact and produce
+near-duplicate questions (observed directly: with `num_questions=10`,
+`batch_size=8`, question 1 and question 9 -- from two different groups --
+ended up asking the exact same thing). None of the 3 eval metrics catch
+this, and vLLM's prefix cache doesn't help either -- it only reuses
+matching *input* tokens between calls, it has no memory of a previous
+call's *output*.
+
+Fix: `generate_question_batch` accepts `already_asked_questions`, and
+`pipeline.py` accumulates every group's questions across the whole job
+and passes them into the next group's call. The addendum is appended
+AFTER the base `shared_prefix` (see
+`batch_quiz_gen.py::build_avoid_repeat_addendum`), not interleaved into
+it, so the cache-relevant base portion (system instruction + retrieved
+context) stays byte-identical across every call in every group -- only
+this small tail differs, and only for groups after the first.
+
+This doesn't guarantee zero repeats (it's still a prompted instruction,
+not a hard constraint) -- there's no post-hoc dedup safety net yet (the
+distractor-duplication problem has one via `repair_duplicate_distractors`;
+question-level duplication doesn't). Worth adding the same repair pattern
+here if avoid-list prompting alone isn't enough in practice.
+
 ## Consolidated per-job JSON output
 
 Beyond the JSONL event log, `run_job_streaming(..., output_json_path=...)`

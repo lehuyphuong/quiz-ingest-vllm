@@ -110,6 +110,7 @@ async def run_job_streaming(
     all_scores: dict[str, list[float]] = {"faithfulness": [], "answer_relevance": [], "diversity": []}
     telemetries_by_stage: dict[str, list[CallTelemetry]] = defaultdict(list)
     all_delivered_items: list[ScoredQuizItem] = []
+    all_asked_questions: list[str] = []  # accumulated across groups, see batch_quiz_gen.build_avoid_repeat_addendum
 
     def _log(t: CallTelemetry, *, stage: str) -> None:
         log_api_call(t, stage=stage)
@@ -134,7 +135,8 @@ async def run_job_streaming(
 
             timer.start_stage("generate_questions")
             questions, q_telemetry, q_failures, q_raw = await generate_question_batch(
-                gen_backend, shared_prefix=shared_prefix, batch_size=group_size
+                gen_backend, shared_prefix=shared_prefix, batch_size=group_size,
+                already_asked_questions=all_asked_questions,
             )
             _log(q_telemetry, stage="generate_questions")
             if q_failures:
@@ -184,6 +186,13 @@ async def run_job_streaming(
             if not items:
                 remaining -= group_size
                 continue
+
+            # Record this group's questions so the NEXT group's
+            # generate_question_batch call can be told to avoid repeating
+            # them -- must happen before eval (which may exclude some
+            # items) since the model already "spent" these facts on this
+            # group regardless of whether eval later drops one.
+            all_asked_questions.extend(it.question for it in items)
 
             timer.start_stage("eval_faithfulness_relevance")
             ragas_scores = await score_faithfulness_and_relevance(

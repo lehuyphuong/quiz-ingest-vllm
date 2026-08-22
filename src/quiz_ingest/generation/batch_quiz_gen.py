@@ -6,6 +6,14 @@ Both calls share the exact same `shared_prefix` (system instruction +
 retrieved context) -- built once by build_shared_prefix() and passed
 unchanged to both calls, so vLLM's prefix cache hits on the second call.
 
+For groups after the first, generate_question_batch appends an
+"already asked" addendum AFTER shared_prefix (see
+build_avoid_repeat_addendum) so separate batch calls against the same
+context don't independently rediscover the same salient fact and produce
+near-duplicate questions -- prefix caching only reuses matching INPUT
+tokens between calls, it carries no memory of what a previous call's
+OUTPUT was, so that has to be threaded through explicitly.
+
 QUESTION_BATCH_SIZE default of 8 is carried over from the earlier project
 as a starting point, NOT re-derived for this repo's model/hardware --
 re-tune it with scripts/bench_stage_timing.py before trusting it (see this
@@ -53,15 +61,51 @@ def build_shared_prefix(topic: str, context_chunks: list[Chunk]) -> str:
     )
 
 
+def build_avoid_repeat_addendum(already_asked_questions: list[str]) -> str:
+    """
+    Appended AFTER the base shared_prefix (context block) for
+    generate_question_batch calls in groups after the first -- so later
+    groups don't independently rediscover the same most-salient fact.
+    Real observed failure this fixes: with num_questions=10 and
+    batch_size=8, group 1 (8 calls' worth) and group 2 (the remaining 2)
+    are two separate, stateless LLM calls sharing the same context. Both
+    independently picked the paper's single most prominent claim,
+    producing two near-duplicate questions with nothing to prevent it --
+    KV-cache/prefix-cache only reuses matching INPUT tokens, it carries no
+    memory of a previous call's OUTPUT. This addendum is how that missing
+    state gets passed along manually.
+
+    Deliberately appended AFTER the base prefix, not interleaved into it,
+    so vLLM's prefix cache still hits on the shared base portion (system
+    instruction + retrieved context) across every call in every group --
+    only this tail differs per group, and it's cheap: it doesn't touch
+    the (much larger) context block that's the expensive part to
+    re-prefill.
+    """
+    if not already_asked_questions:
+        return ""
+    listed = "\n".join(f"- {q}" for q in already_asked_questions)
+    return (
+        "\n\nThe following questions have ALREADY been asked in this quiz -- "
+        "do NOT repeat them or write a close rephrasing of any of them. "
+        f"Pick a genuinely different fact from the context instead:\n{listed}"
+    )
+
+
 async def generate_question_batch(
-    backend: LLMBackend, *, shared_prefix: str, batch_size: int
+    backend: LLMBackend,
+    *,
+    shared_prefix: str,
+    batch_size: int,
+    already_asked_questions: list[str] | None = None,
 ) -> tuple[list[dict], CallTelemetry, list[int], str]:
+    prompt_prefix = shared_prefix + build_avoid_repeat_addendum(already_asked_questions or [])
     item_prompts = [
         f"Write one multiple-choice question grounded in the reference context above."
         for _ in range(batch_size)
     ]
     result = await backend.generate_json_batch(
-        shared_prefix=shared_prefix,
+        shared_prefix=prompt_prefix,
         item_prompts=item_prompts,
         schema_hint=QUESTION_SCHEMA_HINT,
         max_tokens=200 * batch_size,

@@ -68,6 +68,53 @@ def test_assemble_keeps_item_with_genuinely_distinct_distractors():
     assert len(items) == 1
 
 
+def test_avoid_repeat_addendum_empty_when_no_prior_questions():
+    from quiz_ingest.generation.batch_quiz_gen import build_avoid_repeat_addendum
+    assert build_avoid_repeat_addendum([]) == ""
+
+
+def test_avoid_repeat_addendum_lists_prior_questions():
+    from quiz_ingest.generation.batch_quiz_gen import build_avoid_repeat_addendum
+    addendum = build_avoid_repeat_addendum(["What is X?", "What is Y?"])
+    assert "What is X?" in addendum
+    assert "What is Y?" in addendum
+    assert "already been asked" in addendum.lower()
+
+
+@pytest.mark.asyncio
+async def test_generate_question_batch_appends_avoid_list_after_base_prefix():
+    # The base shared_prefix must remain an exact PREFIX of what's sent
+    # (avoid-list appended AFTER it, never interleaved) so vLLM's prefix
+    # cache still hits on the shared base portion across groups.
+    from quiz_ingest.generation.batch_quiz_gen import generate_question_batch
+
+    backend = FakeBackend([([{"index": 0, "question": "Q0"}], [])], embed_vectors=[])
+    base_prefix = "SYSTEM INSTRUCTION + CONTEXT BLOCK"
+
+    await generate_question_batch(
+        backend, shared_prefix=base_prefix, batch_size=1,
+        already_asked_questions=["Earlier question?"],
+    )
+
+    sent_prefix = backend.calls[0]["shared_prefix"]
+    assert sent_prefix.startswith(base_prefix)
+    assert "Earlier question?" in sent_prefix
+
+
+@pytest.mark.asyncio
+async def test_generate_question_batch_first_group_prefix_unchanged():
+    from quiz_ingest.generation.batch_quiz_gen import generate_question_batch
+
+    backend = FakeBackend([([{"index": 0, "question": "Q0"}], [])], embed_vectors=[])
+    base_prefix = "SYSTEM INSTRUCTION + CONTEXT BLOCK"
+
+    await generate_question_batch(
+        backend, shared_prefix=base_prefix, batch_size=1, already_asked_questions=None
+    )
+
+    assert backend.calls[0]["shared_prefix"] == base_prefix  # no addendum, byte-identical
+
+
 class FakeBackend:
     """Minimal LLMBackend stub for eval tests -- returns canned responses.
     Records every generate_json_batch call's kwargs so tests can assert on
