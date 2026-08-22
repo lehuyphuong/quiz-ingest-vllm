@@ -140,10 +140,14 @@ async def run_job_streaming(*, pdf_path: str, topic: str, config: PipelineConfig
             ragas_scores = await score_faithfulness_and_relevance(
                 gen_backend, embed_backend, shared_prefix=shared_prefix, items=items
             )
+            for t in ragas_scores.telemetries:
+                log_api_call(t, stage="eval_faithfulness_relevance")
             timer.end_stage()
 
             timer.start_stage("eval_diversity")
-            diversity_scores = await score_distractor_diversity(embed_backend, items)
+            diversity_scores, diversity_telemetry = await score_distractor_diversity(embed_backend, items)
+            if diversity_telemetry is not None:
+                log_api_call(diversity_telemetry, stage="eval_diversity")
             timer.end_stage()
 
             group_results = []

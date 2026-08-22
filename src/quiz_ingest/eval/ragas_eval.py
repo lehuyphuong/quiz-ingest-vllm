@@ -41,6 +41,11 @@ class EvalScores:
     faithfulness: dict[int, float]  # keyed by QuizItem.index
     answer_relevance: dict[int, float]
     excluded_indices: set[int]  # parse failures at ANY step -- excluded from both dicts above
+    telemetries: list = None  # list[CallTelemetry], populated below; see pipeline.py for logging
+
+    def __post_init__(self):
+        if self.telemetries is None:
+            self.telemetries = []
 
 
 async def score_faithfulness_and_relevance(
@@ -55,6 +60,7 @@ async def score_faithfulness_and_relevance(
     (see README), so a single backend object cannot serve both roles.
     """
     excluded: set[int] = set()
+    telemetries = []
 
     # --- Faithfulness: decompose ---
     decompose_prompts = [
@@ -67,6 +73,7 @@ async def score_faithfulness_and_relevance(
         schema_hint=_STATEMENT_SCHEMA,
         max_tokens=150 * len(items),
     )
+    telemetries.append(decompose_result.telemetry)
     excluded |= {items[i].index for i in decompose_result.parse_failures}
     statements_by_index = {
         items[i].index: obj.get("statements", [])
@@ -92,6 +99,7 @@ async def score_faithfulness_and_relevance(
             schema_hint=_VERIFY_SCHEMA,
             max_tokens=100 * len(verify_prompts),
         )
+        telemetries.append(verify_result.telemetry)
         excluded |= {verify_items_order[i].index for i in verify_result.parse_failures}
         for i, obj in enumerate(verify_result.items):
             if i in verify_result.parse_failures:
@@ -112,6 +120,7 @@ async def score_faithfulness_and_relevance(
         schema_hint=_REVERSE_Q_SCHEMA,
         max_tokens=100 * len(items),
     )
+    telemetries.append(reverse_result.telemetry)
     excluded |= {items[i].index for i in reverse_result.parse_failures}
 
     # Build ONE embed() call for original questions + all reverse-questions
@@ -130,7 +139,8 @@ async def score_faithfulness_and_relevance(
             all_texts.extend(reverse_qs)
             spans.append((item_index, orig_pos, len(reverse_qs)))
 
-        vectors, _telemetry = await embed_backend.embed(all_texts)
+        vectors, embed_telemetry = await embed_backend.embed(all_texts)
+        telemetries.append(embed_telemetry)
         vecs = np.array(vectors)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
         unit_vecs = vecs / norms
@@ -144,5 +154,8 @@ async def score_faithfulness_and_relevance(
             answer_relevance[item_index] = float(np.mean(sims))
 
     return EvalScores(
-        faithfulness=faithfulness, answer_relevance=answer_relevance, excluded_indices=excluded
+        faithfulness=faithfulness,
+        answer_relevance=answer_relevance,
+        excluded_indices=excluded,
+        telemetries=telemetries,
     )

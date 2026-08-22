@@ -19,7 +19,7 @@ from quiz_ingest.llm.base import LLMBackend
 
 async def score_distractor_diversity(
     backend: LLMBackend, items: list[QuizItem]
-) -> dict[int, float]:
+) -> tuple[dict[int, float], object | None]:
     all_texts: list[str] = []
     spans: list[tuple[int, int, int]] = []  # (item_index, start_pos, count)
     for it in items:
@@ -31,9 +31,9 @@ async def score_distractor_diversity(
         spans.append((it.index, start, len(texts)))
 
     if not all_texts:
-        return {}
+        return {}, None
 
-    vectors, _telemetry = await backend.embed(all_texts)
+    vectors, telemetry = await backend.embed(all_texts)
     vecs = np.array(vectors)
     norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
     unit_vecs = vecs / norms
@@ -47,4 +47,4 @@ async def score_distractor_diversity(
         off_diag_sum = sim_matrix.sum() - np.trace(sim_matrix)
         mean_sim = off_diag_sum / (n * (n - 1))
         scores[item_index] = float(1.0 - mean_sim)
-    return scores
+    return scores, telemetry

@@ -30,6 +30,43 @@ def test_assemble_drops_explicitly_dropped_indices():
     assert items == []
 
 
+def test_assemble_drops_item_when_distractor_duplicates_correct_answer():
+    # Real bug observed against Qwen3-4B-Instruct-2507: the model copied
+    # correct_answer verbatim into the "near_miss" distractor slot.
+    questions = [{
+        "index": 0,
+        "question": "Q0",
+        "correct_answer": "The Transformer uses self-attention instead of recurrence.",
+        "supporting_fact": "F0",
+    }]
+    distractors = [{
+        "index": 0,
+        "distractors": [
+            {"text": "The Transformer uses self-attention instead of recurrence.", "type": "near_miss"},
+            {"text": "A genuinely different wrong statement.", "type": "misconception"},
+            {"text": "Another unrelated wrong statement.", "type": "plausible_unrelated"},
+        ],
+    }]
+    items = assemble_quiz_items(questions, distractors, dropped_indices=set(), context_chunks=[])
+    assert items == []  # whole item dropped, not delivered with a broken option
+
+
+def test_assemble_keeps_item_with_genuinely_distinct_distractors():
+    questions = [{
+        "index": 0, "question": "Q0", "correct_answer": "Answer A", "supporting_fact": "F0",
+    }]
+    distractors = [{
+        "index": 0,
+        "distractors": [
+            {"text": "Answer B", "type": "near_miss"},
+            {"text": "Answer C", "type": "misconception"},
+            {"text": "Answer D", "type": "plausible_unrelated"},
+        ],
+    }]
+    items = assemble_quiz_items(questions, distractors, dropped_indices=set(), context_chunks=[])
+    assert len(items) == 1
+
+
 class FakeBackend:
     """Minimal LLMBackend stub for eval tests -- returns canned responses."""
 

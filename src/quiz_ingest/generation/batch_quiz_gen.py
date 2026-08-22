@@ -77,8 +77,11 @@ async def generate_distractor_batch(
 ) -> tuple[list[dict], CallTelemetry, list[int]]:
     item_prompts = [
         f"For the question \"{q.get('question', '')}\" with correct answer "
-        f"\"{q.get('correct_answer', '')}\", write 3 wrong options: one "
-        f"near-miss, one common misconception, one plausible-but-unrelated."
+        f"\"{q.get('correct_answer', '')}\", write 3 DIFFERENT wrong options: "
+        f"one near-miss (plausible but factually incorrect -- NOT a reworded "
+        f"or copied version of the correct answer), one common misconception, "
+        f"one plausible-but-unrelated. Every option's wording must be clearly "
+        f"distinguishable from the correct answer above -- do not repeat it."
         for q in questions
     ]
     result = await backend.generate_json_batch(
@@ -116,13 +119,35 @@ def assemble_quiz_items(
         d = by_index_distractors.get(idx)
         if d is None:
             continue
+        raw_distractors = d.get("distractors", [])
+
+        # Defensive check: a model sometimes copies the correct_answer
+        # verbatim into a distractor slot (observed with Qwen3-4B-Instruct-2507
+        # on the "near_miss" slot specifically, in ~80% of items in one real
+        # run against this prompt before the wording above was tightened).
+        # A distractor identical (or near-identical after normalizing case/
+        # whitespace) to the correct answer makes the question invalid -- two
+        # "correct" options -- and NONE of the 3 eval metrics catch this
+        # (Faithfulness/Answer Relevance only look at correct_answer vs.
+        # context; Diversity only compares distractors to each other, never
+        # to the correct answer). So this has to be caught here, not by a
+        # metric, and the whole item is dropped rather than delivered with a
+        # broken option -- see this repo's eval score integrity principle:
+        # a defective item must never look like a normal, scoreable one.
+        correct_norm = " ".join(q.get("correct_answer", "").split()).lower()
+        distractor_texts_norm = [
+            " ".join(dd.get("text", "").split()).lower() for dd in raw_distractors
+        ]
+        if correct_norm and correct_norm in distractor_texts_norm:
+            continue
+
         items.append(
             QuizItem(
                 index=idx,
                 question=question_text,
                 correct_answer=q.get("correct_answer", ""),
                 supporting_fact=q.get("supporting_fact", ""),
-                distractors=d.get("distractors", []),
+                distractors=raw_distractors,
                 source_chunk_ids=[c.id for c in context_chunks],
             )
         )
