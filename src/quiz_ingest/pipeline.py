@@ -112,8 +112,8 @@ async def run_job_streaming(
     all_delivered_items: list[ScoredQuizItem] = []
     all_asked_questions: list[str] = []  # accumulated across groups, see batch_quiz_gen.build_avoid_repeat_addendum
 
-    def _log(t: CallTelemetry, *, stage: str) -> None:
-        log_api_call(t, stage=stage)
+    def _log(t: CallTelemetry, *, stage: str, extra: dict | None = None) -> None:
+        log_api_call(t, stage=stage, extra=extra)
         telemetries_by_stage[stage].append(t)
 
     try:
@@ -138,7 +138,17 @@ async def run_job_streaming(
                 gen_backend, shared_prefix=shared_prefix, batch_size=group_size,
                 already_asked_questions=all_asked_questions,
             )
-            _log(q_telemetry, stage="generate_questions")
+            # Logged explicitly so a run can be checked after the fact:
+            # was the avoid-repeat list actually sent for this call, and
+            # how big was it? Without this, a duplicate question in the
+            # output is indistinguishable between "the addendum wasn't
+            # sent" (stale deploy, wiring bug) and "the model ignored a
+            # correctly-sent addendum" (weaker compliance) -- very
+            # different problems requiring different fixes.
+            _log(
+                q_telemetry, stage="generate_questions",
+                extra={"avoid_list_size": len(all_asked_questions)},
+            )
             if q_failures:
                 log_parse_failure(
                     stage="generate_questions", raw_text=q_raw,

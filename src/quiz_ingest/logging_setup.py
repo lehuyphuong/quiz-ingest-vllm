@@ -58,8 +58,10 @@ def log_parse_failure(
         f.write(json.dumps(record) + "\n")
 
 
-def log_api_call(telemetry: CallTelemetry, *, stage: str) -> None:
+def log_api_call(telemetry: CallTelemetry, *, stage: str, extra: dict | None = None) -> None:
     record = {"event": "api_call", "stage": stage, "ts": time.time(), **asdict(telemetry)}
+    if extra:
+        record.update(extra)
     with open(_log_path(), "a") as f:
         f.write(json.dumps(record) + "\n")
 
