@@ -28,7 +28,7 @@ from quiz_ingest.ingest.chunking import chunk_text
 from quiz_ingest.ingest.pdf_source import extract_pdf_text
 from quiz_ingest.llm.base import CallTelemetry, LLMBackend
 from quiz_ingest.llm.vllm_client import VLLMClient, VLLMClientConfig
-from quiz_ingest.logging_setup import JobTimer, log_api_call, log_job_summary
+from quiz_ingest.logging_setup import JobTimer, log_api_call, log_job_summary, log_parse_failure
 from quiz_ingest.output_writer import build_job_output, write_job_output_json
 from quiz_ingest.rag.index import RagIndex
 
@@ -133,17 +133,27 @@ async def run_job_streaming(
             group_size = min(config.batch_size, remaining)
 
             timer.start_stage("generate_questions")
-            questions, q_telemetry, q_failures = await generate_question_batch(
+            questions, q_telemetry, q_failures, q_raw = await generate_question_batch(
                 gen_backend, shared_prefix=shared_prefix, batch_size=group_size
             )
             _log(q_telemetry, stage="generate_questions")
+            if q_failures:
+                log_parse_failure(
+                    stage="generate_questions", raw_text=q_raw,
+                    failed_indices=q_failures, total_count=group_size,
+                )
             timer.end_stage()
 
             timer.start_stage("generate_distractors")
-            distractors, d_telemetry, d_failures = await generate_distractor_batch(
+            distractors, d_telemetry, d_failures, d_raw = await generate_distractor_batch(
                 gen_backend, shared_prefix=shared_prefix, questions=questions
             )
             _log(d_telemetry, stage="generate_distractors")
+            if d_failures:
+                log_parse_failure(
+                    stage="generate_distractors", raw_text=d_raw,
+                    failed_indices=d_failures, total_count=len(questions),
+                )
             timer.end_stage()
 
             dropped = {questions[i].get("index") for i in q_failures} | {
@@ -151,6 +161,16 @@ async def run_job_streaming(
             }
             items = assemble_quiz_items(questions, distractors, dropped, context_chunks)
             if not items:
+                log_parse_failure(
+                    stage="assemble_quiz_items",
+                    raw_text=(
+                        f"[no items survived assembly for this group of {group_size}] "
+                        f"generate_questions raw: {q_raw[:1500]!r} ||| "
+                        f"generate_distractors raw: {d_raw[:1500]!r}"
+                    ),
+                    failed_indices=list(range(group_size)),
+                    total_count=group_size,
+                )
                 remaining -= group_size
                 continue
 

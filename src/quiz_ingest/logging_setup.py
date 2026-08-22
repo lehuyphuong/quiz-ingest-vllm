@@ -32,6 +32,32 @@ def _log_path() -> Path:
     return LOG_DIR / f"quiz-ingest-events-{date.today().isoformat()}.jsonl"
 
 
+def log_parse_failure(
+    *, stage: str, raw_text: str, failed_indices: list[int], total_count: int
+) -> None:
+    """
+    Written whenever a batch JSON response has ANY parse failures --
+    including a full-batch failure, which previously left NO trace: the
+    group would just silently disappear (assemble_quiz_items returns
+    empty, pipeline.py skips to the next group) with nothing in the log
+    explaining why. raw_text is truncated to keep log lines a sane size --
+    this is for diagnosing WHY parsing failed (malformed JSON, wrapped in
+    prose, truncated at max_tokens, schema drift under a larger batch
+    size), not for replaying the call.
+    """
+    record = {
+        "event": "parse_failure",
+        "stage": stage,
+        "ts": time.time(),
+        "failed_count": len(failed_indices),
+        "total_count": total_count,
+        "failed_indices": failed_indices,
+        "raw_text_excerpt": raw_text[:4000],
+    }
+    with open(_log_path(), "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def log_api_call(telemetry: CallTelemetry, *, stage: str) -> None:
     record = {"event": "api_call", "stage": stage, "ts": time.time(), **asdict(telemetry)}
     with open(_log_path(), "a") as f:

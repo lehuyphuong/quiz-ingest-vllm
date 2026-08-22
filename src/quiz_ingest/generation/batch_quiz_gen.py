@@ -55,7 +55,7 @@ def build_shared_prefix(topic: str, context_chunks: list[Chunk]) -> str:
 
 async def generate_question_batch(
     backend: LLMBackend, *, shared_prefix: str, batch_size: int
-) -> tuple[list[dict], CallTelemetry, list[int]]:
+) -> tuple[list[dict], CallTelemetry, list[int], str]:
     item_prompts = [
         f"Write one multiple-choice question grounded in the reference context above."
         for _ in range(batch_size)
@@ -66,7 +66,7 @@ async def generate_question_batch(
         schema_hint=QUESTION_SCHEMA_HINT,
         max_tokens=200 * batch_size,
     )
-    return result.items, result.telemetry, result.parse_failures
+    return result.items, result.telemetry, result.parse_failures, result.raw_text
 
 
 async def generate_distractor_batch(
@@ -74,7 +74,7 @@ async def generate_distractor_batch(
     *,
     shared_prefix: str,
     questions: list[dict],
-) -> tuple[list[dict], CallTelemetry, list[int]]:
+) -> tuple[list[dict], CallTelemetry, list[int], str]:
     item_prompts = [
         f"For the question \"{q.get('question', '')}\" with correct answer "
         f"\"{q.get('correct_answer', '')}\", write 3 DIFFERENT wrong options: "
@@ -90,7 +90,7 @@ async def generate_distractor_batch(
         schema_hint=DISTRACTOR_SCHEMA_HINT,
         max_tokens=150 * len(questions),
     )
-    return result.items, result.telemetry, result.parse_failures
+    return result.items, result.telemetry, result.parse_failures, result.raw_text
 
 
 def _distractor_duplicates_correct(correct_answer: str, distractors: list[dict]) -> bool:
@@ -194,7 +194,7 @@ async def repair_duplicate_distractors(
             {"index": it.index, "question": it.question, "correct_answer": it.correct_answer}
             for it in bad
         ]
-        new_distractors, telemetry, failures = await generate_distractor_batch(
+        new_distractors, telemetry, failures, _raw = await generate_distractor_batch(
             backend, shared_prefix=shared_prefix, questions=questions_payload
         )
         telemetries.append(telemetry)
