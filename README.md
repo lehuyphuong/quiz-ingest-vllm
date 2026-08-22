@@ -86,8 +86,12 @@ vllm serve google/gemma-3-4b-it \
 
 # embedding, port 8001 (separate process -- vLLM does not serve
 # generate + embed from one process)
+# NOTE: `--task embed` is deprecated as of recent vLLM releases -- use
+# `--runner pooling` instead (vLLM usually auto-detects this correctly
+# for a native embedding model like Qwen3-Embedding-*, but pass it
+# explicitly to not depend on auto-detection).
 vllm serve Qwen/Qwen3-Embedding-0.6B \
-    --task embed \
+    --runner pooling \
     --port 8001 \
     --gpu-memory-utilization 0.25
 ```

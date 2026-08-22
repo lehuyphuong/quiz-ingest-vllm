@@ -224,9 +224,10 @@ class VLLMClient:
         if not self._cfg.embed_model:
             raise ValueError(
                 "VLLMClientConfig.embed_model not set -- point this client at an "
-                "instance running with --task embed, or use a second VLLMClient "
-                "for embeddings (see context.md: generation and embedding are "
-                "separate vLLM processes/instances)."
+                "instance running with --runner pooling (the current vLLM flag; "
+                "--task embed is deprecated), or use a second VLLMClient for "
+                "embeddings (see README: generation and embedding are separate "
+                "vLLM processes/instances)."
             )
         t0 = time.monotonic()
         resp = await self._client.post(
