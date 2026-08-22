@@ -180,6 +180,23 @@ generations. `assemble_quiz_items()` and `score_faithfulness_and_relevance()`
 both propagate failure indices explicitly instead of letting them look
 like real zeros downstream.
 
+**Faithfulness checks the real retrieved context, not the model's own
+self-report.** The verify step compares decomposed statements against
+`shared_prefix` (the actual RAG context sent to the generation call), not
+against a per-item `supporting_fact` field the model wrote in the same
+call as `correct_answer`. Checking a claim against the model's own
+self-report is a self-referential loop with zero grounding guarantee --
+observed directly in a real run: a negation-style question ("which is
+NOT a feature...") whose `correct_answer` was objectively false (it
+asserted the Transformer uses recurrent attention -- the exact opposite
+of the paper's central claim) still scored `faithfulness=1.0`, because
+the model's self-written `supporting_fact` agreed with its own false
+claim. This is a real limitation of using the same model as both
+generator and judge -- pointing the check at the real context closes the
+most egregious failure mode (self-consistency masquerading as grounding)
+but doesn't guarantee a small judge model never misjudges a genuinely
+subtle case.
+
 Separately, a distractor that's a literal copy of the correct answer
 (observed in real runs against `Qwen3-4B-Instruct-2507` -- see
 `generation/batch_quiz_gen.py`) is caught and **repaired**, not just
@@ -189,6 +206,23 @@ item if it's still duplicated after the retry budget is exhausted. None
 of the 3 eval metrics catch this on their own -- Faithfulness/Answer
 Relevance never look at the distractors, and Diversity only compares
 distractors to each other, never to the correct answer.
+
+## Diagnosing a batch that silently produces fewer items than requested
+
+Every `generate_json_batch` call whose response has ANY parse failures --
+including a full-batch failure that used to leave zero trace -- now logs
+a `parse_failure` event (`logging_setup.py::log_parse_failure`) with the
+stage, how many of the batch failed, and a `raw_text_excerpt` of what the
+model actually returned:
+
+```bash
+grep '"event": "parse_failure"' logs/quiz-ingest-events-*.jsonl | python3 -m json.tool
+```
+
+If a whole group of items disappears (e.g. requesting 10 delivers fewer,
+with a gap in the middle), check this first -- it was previously
+indistinguishable from "the model just decided not to answer," with no
+diagnostic path at all.
 
 ## Consolidated per-job JSON output
 

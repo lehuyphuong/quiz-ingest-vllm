@@ -69,14 +69,18 @@ def test_assemble_keeps_item_with_genuinely_distinct_distractors():
 
 
 class FakeBackend:
-    """Minimal LLMBackend stub for eval tests -- returns canned responses."""
+    """Minimal LLMBackend stub for eval tests -- returns canned responses.
+    Records every generate_json_batch call's kwargs so tests can assert on
+    what was actually sent (e.g. that supporting_fact text is absent)."""
 
     def __init__(self, generate_responses, embed_vectors):
         self._responses = iter(generate_responses)
         self._embed_vectors = embed_vectors
         self.model_name = "fake-model"
+        self.calls = []
 
     async def generate_json_batch(self, **kwargs):
+        self.calls.append(kwargs)
         items, failures = next(self._responses)
         telemetry = CallTelemetry(
             call_type="generate_json", model="fake", prompt_tokens=1,
@@ -122,6 +126,44 @@ async def test_faithfulness_excludes_parse_failures_not_zero_score():
     assert 1 not in result.answer_relevance
     assert 0 in result.answer_relevance
     assert 0 in result.faithfulness
+
+
+@pytest.mark.asyncio
+async def test_faithfulness_verify_does_not_leak_supporting_fact_into_prompt():
+    # Regression test for a real bug: verify used to check statements
+    # against it.supporting_fact (model's own self-report, generated in
+    # the same call as correct_answer) instead of the actual retrieved
+    # context -- a self-referential check that always passes even when
+    # correct_answer is objectively false. This asserts the verify call's
+    # item_prompts never contain the item's supporting_fact text, i.e. the
+    # grounding source is shared_prefix (the real context), not self-report.
+    from quiz_ingest.eval.ragas_eval import score_faithfulness_and_relevance
+    from quiz_ingest.generation.batch_quiz_gen import QuizItem
+
+    distinctive_supporting_fact = "UNIQUE_MARKER_do_not_leak_into_verify_prompt"
+    items = [
+        QuizItem(
+            index=0, question="Q0", correct_answer="A0",
+            supporting_fact=distinctive_supporting_fact,
+            distractors=[], source_chunk_ids=[],
+        ),
+    ]
+    responses = [
+        ([{"index": 0, "statements": ["s0"]}], []),
+        ([{"index": 0, "verdicts": [1]}], []),
+        ([{"index": 0, "reverse_questions": ["r0a", "r0b", "r0c"]}], []),
+    ]
+    embed_vectors = [[1.0, 0.0]] * 10
+    backend = FakeBackend(responses, embed_vectors)
+
+    await score_faithfulness_and_relevance(
+        backend, backend, shared_prefix="the real retrieved context", items=items
+    )
+
+    # calls[0]=decompose, calls[1]=verify, calls[2]=reverse-question
+    verify_call = backend.calls[1]
+    assert distinctive_supporting_fact not in " ".join(verify_call["item_prompts"])
+    assert verify_call["shared_prefix"] == "the real retrieved context"
 
 
 class FakeDistractorRepairBackend:
