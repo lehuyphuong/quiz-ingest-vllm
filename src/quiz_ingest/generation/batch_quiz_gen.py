@@ -93,6 +93,23 @@ async def generate_distractor_batch(
     return result.items, result.telemetry, result.parse_failures
 
 
+def _distractor_duplicates_correct(correct_answer: str, distractors: list[dict]) -> bool:
+    """
+    True if any distractor is a literal (whitespace/case-normalized) copy
+    of the correct answer -- see assemble_quiz_items and
+    repair_duplicate_distractors docstrings for why this must never reach
+    delivery, and why it's caught here instead of by one of the 3 eval
+    metrics (none of which compare a distractor against correct_answer).
+    """
+    correct_norm = " ".join(correct_answer.split()).lower()
+    if not correct_norm:
+        return False
+    for d in distractors:
+        if " ".join(d.get("text", "").split()).lower() == correct_norm:
+            return True
+    return False
+
+
 def assemble_quiz_items(
     questions: list[dict],
     distractors: list[dict],
@@ -106,6 +123,12 @@ def assemble_quiz_items(
     a half-populated item is worse than dropping it. Also drops any item
     whose question field is blank even if it otherwise parsed, carried
     over from a real bug in the earlier project.
+
+    Does NOT check for a distractor duplicating the correct answer -- that
+    check now lives in repair_duplicate_distractors(), which gets a chance
+    to fix it with a targeted regeneration before anything is dropped for
+    that reason. This function only drops items that are structurally
+    unusable (missing pieces), never items that are merely low-quality.
     """
     by_index_distractors = {d.get("index"): d for d in distractors}
     items: list[QuizItem] = []
@@ -119,36 +142,76 @@ def assemble_quiz_items(
         d = by_index_distractors.get(idx)
         if d is None:
             continue
-        raw_distractors = d.get("distractors", [])
-
-        # Defensive check: a model sometimes copies the correct_answer
-        # verbatim into a distractor slot (observed with Qwen3-4B-Instruct-2507
-        # on the "near_miss" slot specifically, in ~80% of items in one real
-        # run against this prompt before the wording above was tightened).
-        # A distractor identical (or near-identical after normalizing case/
-        # whitespace) to the correct answer makes the question invalid -- two
-        # "correct" options -- and NONE of the 3 eval metrics catch this
-        # (Faithfulness/Answer Relevance only look at correct_answer vs.
-        # context; Diversity only compares distractors to each other, never
-        # to the correct answer). So this has to be caught here, not by a
-        # metric, and the whole item is dropped rather than delivered with a
-        # broken option -- see this repo's eval score integrity principle:
-        # a defective item must never look like a normal, scoreable one.
-        correct_norm = " ".join(q.get("correct_answer", "").split()).lower()
-        distractor_texts_norm = [
-            " ".join(dd.get("text", "").split()).lower() for dd in raw_distractors
-        ]
-        if correct_norm and correct_norm in distractor_texts_norm:
-            continue
-
         items.append(
             QuizItem(
                 index=idx,
                 question=question_text,
                 correct_answer=q.get("correct_answer", ""),
                 supporting_fact=q.get("supporting_fact", ""),
-                distractors=raw_distractors,
+                distractors=d.get("distractors", []),
                 source_chunk_ids=[c.id for c in context_chunks],
             )
         )
     return items
+
+
+async def repair_duplicate_distractors(
+    backend: LLMBackend,
+    *,
+    shared_prefix: str,
+    items: list[QuizItem],
+    max_retries: int = 1,
+) -> tuple[list[QuizItem], list[CallTelemetry]]:
+    """
+    Finds items whose distractors literally duplicate the correct answer
+    (see _distractor_duplicates_correct) and regenerates ONLY those items'
+    distractors, instead of dropping the whole item outright.
+
+    This matters because generate_distractor_batch produces distractors
+    for a whole group in ONE completion -- if the model settles into the
+    copy-the-answer pattern during that one completion, it tends to do it
+    for every item in the group at once (observed directly: one real run
+    had every item in a 5-question batch hit this simultaneously,
+    delivering 0/5 despite every LLM call succeeding). Repairing only the
+    affected subset, in a second smaller batched call, is both cheaper
+    than dropping the whole group and avoids that correlated-failure
+    pattern repeating on the retry (different, smaller batch composition).
+
+    Items still duplicated after `max_retries` repair attempts are
+    dropped -- never delivered with a broken option (same principle as
+    assemble_quiz_items and the eval-score-exclusion logic in
+    eval/ragas_eval.py: a defective item must never look like a normal,
+    scoreable one).
+    """
+    telemetries: list[CallTelemetry] = []
+    ok = [it for it in items if not _distractor_duplicates_correct(it.correct_answer, it.distractors)]
+    bad = [it for it in items if it.index not in {o.index for o in ok}]
+
+    for _attempt in range(max_retries):
+        if not bad:
+            break
+        questions_payload = [
+            {"index": it.index, "question": it.question, "correct_answer": it.correct_answer}
+            for it in bad
+        ]
+        new_distractors, telemetry, failures = await generate_distractor_batch(
+            backend, shared_prefix=shared_prefix, questions=questions_payload
+        )
+        telemetries.append(telemetry)
+        by_index = {d.get("index"): d.get("distractors", []) for d in new_distractors}
+
+        still_bad = []
+        for it in bad:
+            new_d = by_index.get(it.index)
+            if new_d is None:
+                still_bad.append(it)  # parse failure on the retry -- try again next loop (or drop)
+                continue
+            it.distractors = new_d
+            if _distractor_duplicates_correct(it.correct_answer, it.distractors):
+                still_bad.append(it)
+            else:
+                ok.append(it)
+        bad = still_bad
+
+    # Anything still bad after all retries is dropped, not delivered.
+    return ok, telemetries

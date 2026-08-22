@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -37,6 +38,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--chunk-size", type=int, default=1000)
     p.add_argument("--chunk-overlap", type=int, default=150)
     p.add_argument("--top-k", type=int, default=12)
+    p.add_argument(
+        "--output-json",
+        default=None,
+        help="Path for the consolidated job summary JSON (items + usage + "
+        "latency incl. per-stage token/s). Defaults to "
+        "outputs/quiz_output_<pdf-stem>_<timestamp>.json",
+    )
     return p.parse_args()
 
 
@@ -56,7 +64,12 @@ async def main() -> None:
     )
 
     n = 0
-    async for group in run_job_streaming(pdf_path=args.pdf, topic=args.topic, config=config):
+    output_json_path = args.output_json or (
+        f"outputs/quiz_output_{Path(args.pdf).stem}_{int(time.time())}.json"
+    )
+    async for group in run_job_streaming(
+        pdf_path=args.pdf, topic=args.topic, config=config, output_json_path=output_json_path
+    ):
         for item in group:
             n += 1
             print("=" * 70)
@@ -73,7 +86,9 @@ async def main() -> None:
             )
             print()
 
-    print(f"Done. Delivered {n}/{args.num_questions} questions. See logs/ for full telemetry.")
+    print(f"Done. Delivered {n}/{args.num_questions} questions.")
+    print(f"Per-call telemetry (JSONL): logs/")
+    print(f"Consolidated job output (JSON): {output_json_path}")
 
 
 if __name__ == "__main__":

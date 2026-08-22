@@ -180,6 +180,70 @@ generations. `assemble_quiz_items()` and `score_faithfulness_and_relevance()`
 both propagate failure indices explicitly instead of letting them look
 like real zeros downstream.
 
+Separately, a distractor that's a literal copy of the correct answer
+(observed in real runs against `Qwen3-4B-Instruct-2507` -- see
+`generation/batch_quiz_gen.py`) is caught and **repaired**, not just
+dropped: `repair_duplicate_distractors()` regenerates distractors for
+only the affected items in one smaller batched call, and only drops an
+item if it's still duplicated after the retry budget is exhausted. None
+of the 3 eval metrics catch this on their own -- Faithfulness/Answer
+Relevance never look at the distractors, and Diversity only compares
+distractors to each other, never to the correct answer.
+
+## Consolidated per-job JSON output
+
+Beyond the JSONL event log, `run_job_streaming(..., output_json_path=...)`
+writes one consolidated JSON per job on completion (default path:
+`outputs/quiz_output_<pdf-stem>_<timestamp>.json`, printed by
+`generate_quiz_from_pdf.py` at the end of a run). Schema:
+
+```json
+{
+  "source_mode": "pdf",
+  "source": "path/to/document.pdf",
+  "items": [
+    {
+      "question": "...",
+      "options": [{"text": "...", "is_correct": false, "type": "near_miss"}, ...],
+      "num_correct": 1,
+      "supporting_fact": "...",
+      "faithfulness": 0.95,
+      "answer_relevance": 0.74,
+      "diversity": 0.35,
+      "source_chunk_ids": [3, 7, 12]
+    }
+  ],
+  "usage": {
+    "total_calls": 6,
+    "total_prompt_tokens": 18432,
+    "total_completion_tokens": 3120,
+    "avg_tokens_per_question": 4310.4
+  },
+  "latency": {
+    "wall_time_s": 23.76,
+    "stage_timings_s": {"generate_questions": 6.28, "eval_faithfulness_relevance": 8.35, "...": "..."},
+    "stage_token_throughput": {
+      "generate_questions": {
+        "call_count": 1, "total_prompt_tokens": 3091, "total_completion_tokens": 535,
+        "mean_ttft_s": 0.27, "mean_decode_tokens_per_second": 98.9
+      },
+      "...": "..."
+    }
+  }
+}
+```
+
+Two deliberate differences from an earlier project's per-job JSON this
+schema is adapted from:
+- No `estimated_cost_usd` -- self-hosted GPU has no per-token API cost;
+  the real cost is $/hr instance rental over uptime, not a per-job
+  number, so it isn't fabricated here.
+- `stage_token_throughput` (mean TTFT + mean decode tokens/s **per
+  stage**) is new -- the earlier project's vLLM backend could only
+  report an approximate, non-streaming total latency. Every number here
+  comes from the same `CallTelemetry` objects also written to
+  `logs/*.jsonl`, so the two outputs can never disagree.
+
 ## Tests
 
 ```bash

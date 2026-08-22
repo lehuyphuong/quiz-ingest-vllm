@@ -11,6 +11,7 @@ project's UX.
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 
 from quiz_ingest.config import PipelineConfig
@@ -21,12 +22,14 @@ from quiz_ingest.generation.batch_quiz_gen import (
     build_shared_prefix,
     generate_distractor_batch,
     generate_question_batch,
+    repair_duplicate_distractors,
 )
 from quiz_ingest.ingest.chunking import chunk_text
 from quiz_ingest.ingest.pdf_source import extract_pdf_text
-from quiz_ingest.llm.base import LLMBackend
+from quiz_ingest.llm.base import CallTelemetry, LLMBackend
 from quiz_ingest.llm.vllm_client import VLLMClient, VLLMClientConfig
 from quiz_ingest.logging_setup import JobTimer, log_api_call, log_job_summary
+from quiz_ingest.output_writer import build_job_output, write_job_output_json
 from quiz_ingest.rag.index import RagIndex
 
 
@@ -35,6 +38,7 @@ class ScoredQuizItem:
     question: str
     correct_answer: str
     distractors: list[dict]
+    supporting_fact: str
     faithfulness: float | None
     answer_relevance: float | None
     diversity: float | None
@@ -83,12 +87,20 @@ async def run_job(
     return results
 
 
-async def run_job_streaming(*, pdf_path: str, topic: str, config: PipelineConfig):
+async def run_job_streaming(
+    *, pdf_path: str, topic: str, config: PipelineConfig, output_json_path: str | None = None
+):
     """
     Async generator: yields a list[ScoredQuizItem] per completed batch
     group (progressive delivery), as soon as that group's eval scores are
     ready -- does not wait for all config.num_questions before yielding
     the first group.
+
+    If output_json_path is given, writes ONE consolidated JSON summary
+    there when the job finishes successfully (see output_writer.py) --
+    items + usage + latency (including real per-stage token/s), built
+    from the exact same CallTelemetry objects also streamed to
+    logs/*.jsonl via log_api_call.
     """
     gen_backend, embed_backend = _build_backends(config)
     timer = JobTimer()
@@ -96,6 +108,12 @@ async def run_job_streaming(*, pdf_path: str, topic: str, config: PipelineConfig
     delivered = 0
     status = "failed"  # overwritten to "completed" only if the whole loop finishes
     all_scores: dict[str, list[float]] = {"faithfulness": [], "answer_relevance": [], "diversity": []}
+    telemetries_by_stage: dict[str, list[CallTelemetry]] = defaultdict(list)
+    all_delivered_items: list[ScoredQuizItem] = []
+
+    def _log(t: CallTelemetry, *, stage: str) -> None:
+        log_api_call(t, stage=stage)
+        telemetries_by_stage[stage].append(t)
 
     try:
         timer.start_stage("ingest_and_chunk")
@@ -118,14 +136,14 @@ async def run_job_streaming(*, pdf_path: str, topic: str, config: PipelineConfig
             questions, q_telemetry, q_failures = await generate_question_batch(
                 gen_backend, shared_prefix=shared_prefix, batch_size=group_size
             )
-            log_api_call(q_telemetry, stage="generate_questions")
+            _log(q_telemetry, stage="generate_questions")
             timer.end_stage()
 
             timer.start_stage("generate_distractors")
             distractors, d_telemetry, d_failures = await generate_distractor_batch(
                 gen_backend, shared_prefix=shared_prefix, questions=questions
             )
-            log_api_call(d_telemetry, stage="generate_distractors")
+            _log(d_telemetry, stage="generate_distractors")
             timer.end_stage()
 
             dropped = {questions[i].get("index") for i in q_failures} | {
@@ -136,35 +154,46 @@ async def run_job_streaming(*, pdf_path: str, topic: str, config: PipelineConfig
                 remaining -= group_size
                 continue
 
+            timer.start_stage("repair_distractors")
+            items, repair_telemetries = await repair_duplicate_distractors(
+                gen_backend, shared_prefix=shared_prefix, items=items
+            )
+            for t in repair_telemetries:
+                _log(t, stage="repair_distractors")
+            timer.end_stage()
+            if not items:
+                remaining -= group_size
+                continue
+
             timer.start_stage("eval_faithfulness_relevance")
             ragas_scores = await score_faithfulness_and_relevance(
                 gen_backend, embed_backend, shared_prefix=shared_prefix, items=items
             )
             for t in ragas_scores.telemetries:
-                log_api_call(t, stage="eval_faithfulness_relevance")
+                _log(t, stage="eval_faithfulness_relevance")
             timer.end_stage()
 
             timer.start_stage("eval_diversity")
             diversity_scores, diversity_telemetry = await score_distractor_diversity(embed_backend, items)
             if diversity_telemetry is not None:
-                log_api_call(diversity_telemetry, stage="eval_diversity")
+                _log(diversity_telemetry, stage="eval_diversity")
             timer.end_stage()
 
             group_results = []
             for it in items:
                 if it.index in ragas_scores.excluded_indices:
                     continue  # parse failure -- excluded, not scored 0.0
-                group_results.append(
-                    ScoredQuizItem(
-                        question=it.question,
-                        correct_answer=it.correct_answer,
-                        distractors=it.distractors,
-                        faithfulness=ragas_scores.faithfulness.get(it.index),
-                        answer_relevance=ragas_scores.answer_relevance.get(it.index),
-                        diversity=diversity_scores.get(it.index),
-                        source_chunk_ids=it.source_chunk_ids,
-                    )
+                scored = ScoredQuizItem(
+                    question=it.question,
+                    correct_answer=it.correct_answer,
+                    distractors=it.distractors,
+                    supporting_fact=it.supporting_fact,
+                    faithfulness=ragas_scores.faithfulness.get(it.index),
+                    answer_relevance=ragas_scores.answer_relevance.get(it.index),
+                    diversity=diversity_scores.get(it.index),
+                    source_chunk_ids=it.source_chunk_ids,
                 )
+                group_results.append(scored)
                 for key, val in (
                     ("faithfulness", ragas_scores.faithfulness.get(it.index)),
                     ("answer_relevance", ragas_scores.answer_relevance.get(it.index)),
@@ -174,11 +203,13 @@ async def run_job_streaming(*, pdf_path: str, topic: str, config: PipelineConfig
                         all_scores[key].append(val)
 
             delivered += len(group_results)
+            all_delivered_items.extend(group_results)
             remaining -= group_size
             yield group_results
 
         status = "completed"
     finally:
+        wall_time_s = time.monotonic() - job_start
         mean_scores = {
             k: (sum(v) / len(v) if v else 0.0) for k, v in all_scores.items()
         }
@@ -186,7 +217,17 @@ async def run_job_streaming(*, pdf_path: str, topic: str, config: PipelineConfig
             status=status,
             num_delivered=delivered,
             num_requested=config.num_questions,
-            wall_time_s=time.monotonic() - job_start,
+            wall_time_s=wall_time_s,
             stage_timings_s=timer.stage_timings_s,
             mean_scores=mean_scores,
         )
+        if output_json_path is not None and status == "completed":
+            output = build_job_output(
+                source_mode="pdf",
+                source=pdf_path,
+                scored_items=all_delivered_items,
+                wall_time_s=wall_time_s,
+                stage_timings_s=timer.stage_timings_s,
+                telemetries_by_stage=telemetries_by_stage,
+            )
+            write_job_output_json(output, output_json_path)
