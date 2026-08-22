@@ -44,8 +44,16 @@ class EvalScores:
 
 
 async def score_faithfulness_and_relevance(
-    backend: LLMBackend, *, shared_prefix: str, items: list[QuizItem]
+    gen_backend: LLMBackend, embed_backend: LLMBackend, *, shared_prefix: str, items: list[QuizItem]
 ) -> EvalScores:
+    """
+    gen_backend handles the 3 generate_json_batch calls (decompose,
+    verify, reverse-question). embed_backend handles the ONE embed()
+    call for Answer Relevance similarity. These are separate parameters
+    -- not one backend used for both -- because in instance mode
+    generation and embedding are two different vLLM processes/ports
+    (see README), so a single backend object cannot serve both roles.
+    """
     excluded: set[int] = set()
 
     # --- Faithfulness: decompose ---
@@ -53,7 +61,7 @@ async def score_faithfulness_and_relevance(
         f"Break this answer into atomic factual statements: \"{it.correct_answer}\""
         for it in items
     ]
-    decompose_result = await backend.generate_json_batch(
+    decompose_result = await gen_backend.generate_json_batch(
         shared_prefix=shared_prefix,
         item_prompts=decompose_prompts,
         schema_hint=_STATEMENT_SCHEMA,
@@ -78,7 +86,7 @@ async def score_faithfulness_and_relevance(
     verify_items_order = [it for it in items if it.index in statements_by_index]
     faithfulness: dict[int, float] = {}
     if verify_prompts:
-        verify_result = await backend.generate_json_batch(
+        verify_result = await gen_backend.generate_json_batch(
             shared_prefix=shared_prefix,
             item_prompts=verify_prompts,
             schema_hint=_VERIFY_SCHEMA,
@@ -98,7 +106,7 @@ async def score_faithfulness_and_relevance(
         f"Given this answer, write 3 questions it could be answering: \"{it.correct_answer}\""
         for it in items
     ]
-    reverse_result = await backend.generate_json_batch(
+    reverse_result = await gen_backend.generate_json_batch(
         shared_prefix=shared_prefix,
         item_prompts=reverse_prompts,
         schema_hint=_REVERSE_Q_SCHEMA,
@@ -122,7 +130,7 @@ async def score_faithfulness_and_relevance(
             all_texts.extend(reverse_qs)
             spans.append((item_index, orig_pos, len(reverse_qs)))
 
-        vectors, _telemetry = await backend.embed(all_texts)
+        vectors, _telemetry = await embed_backend.embed(all_texts)
         vecs = np.array(vectors)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
         unit_vecs = vecs / norms

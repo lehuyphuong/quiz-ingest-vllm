@@ -138,7 +138,7 @@ async def run_job_streaming(*, pdf_path: str, topic: str, config: PipelineConfig
 
             timer.start_stage("eval_faithfulness_relevance")
             ragas_scores = await score_faithfulness_and_relevance(
-                gen_backend, shared_prefix=shared_prefix, items=items
+                gen_backend, embed_backend, shared_prefix=shared_prefix, items=items
             )
             timer.end_stage()
 

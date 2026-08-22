@@ -76,7 +76,9 @@ async def test_faithfulness_excludes_parse_failures_not_zero_score():
     embed_vectors = [[1.0, 0.0]] * 10
     backend = FakeBackend(responses, embed_vectors)
 
-    result = await score_faithfulness_and_relevance(backend, shared_prefix="ctx", items=items)
+    result = await score_faithfulness_and_relevance(
+        backend, backend, shared_prefix="ctx", items=items
+    )
 
     assert 1 in result.excluded_indices
     assert 1 not in result.answer_relevance
