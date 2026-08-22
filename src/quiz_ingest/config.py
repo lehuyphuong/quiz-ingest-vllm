@@ -25,7 +25,7 @@ class PipelineConfig:
     # instance mode
     vllm_base_url: str | None = None  # generation model, e.g. http://<ip>:8000
     embed_base_url: str | None = None  # embedding model -- separate vLLM process/instance
-    model: str = "google/gemma-3-4b-it"
+    model: str = "Qwen/Qwen3-4B-Instruct-2507"
     embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
 
     # serverless mode (only read when backend == "serverless")

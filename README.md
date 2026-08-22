@@ -78,10 +78,10 @@ KV pool (see "Prefix caching" below for why that headroom matters):
 
 ```bash
 # generation, port 8000
-vllm serve google/gemma-3-4b-it \
+vllm serve Qwen/Qwen3-4B-Instruct-2507 \
     --port 8000 \
     --gpu-memory-utilization 0.55 \
-    --max-model-len 32768 \
+    --max-model-len 16384 \
     --enable-prefix-caching
 
 # embedding, port 8001 (separate process -- vLLM does not serve
@@ -157,7 +157,7 @@ python scripts/bench_stage_timing.py \
     --pdf path/to/document.pdf --topic "history of rome" \
     --vllm-base-url http://localhost:8000 --embed-base-url http://localhost:8001 \
     --batch-sizes 4 8 16 32 --num-questions 16 --repeats 2 \
-    --model google/gemma-3-4b-it
+    --model Qwen/Qwen3-4B-Instruct-2507
 ```
 
 Prints a table of `stage_timings_s` + mean 3-metric scores per

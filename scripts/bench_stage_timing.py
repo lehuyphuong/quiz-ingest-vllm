@@ -112,7 +112,7 @@ def summarize_logs() -> None:
 
 async def main() -> None:
     args = parse_args()
-    models = args.model or ["google/gemma-3-4b-it"]
+    models = args.model or ["Qwen/Qwen3-4B-Instruct-2507"]
 
     for model in models:
         for batch_size in args.batch_sizes:

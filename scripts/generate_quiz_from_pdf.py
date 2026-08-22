@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--vllm-base-url", required=True)
     p.add_argument("--embed-base-url", default=None)
-    p.add_argument("--model", default="google/gemma-3-4b-it")
+    p.add_argument("--model", default="Qwen/Qwen3-4B-Instruct-2507")
     p.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-0.6B")
     p.add_argument("--chunk-size", type=int, default=1000)
     p.add_argument("--chunk-overlap", type=int, default=150)
