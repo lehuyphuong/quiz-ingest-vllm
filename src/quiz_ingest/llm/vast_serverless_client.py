@@ -134,6 +134,7 @@ class VastServerlessClient:
             ttft_s=None,
             decode_tokens_per_second=None,
             wall_time_s=wall_time,
+            hit_token_limit=(usage.get("completion_tokens", 0) >= max_tokens > 0),
         )
         return GenerateJsonBatchResult(
             items=items, raw_text=raw_text, telemetry=telemetry, parse_failures=parse_failures

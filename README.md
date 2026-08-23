@@ -426,18 +426,48 @@ A load test with randomized topics and low `retrieve_top_k` surfaced a
 real failure mode no eval metric was catching: a request grounded in
 the sample PDF (topic "training efficiency of the transformer")
 produced a fully-formed, validly-structured question about
-*mitochondria* -- the model's own prose even said the context didn't
-contain the requested information, then generated unrelated content
-anyway (a known LLM behavior: falling back to a memorized template
-example under genuine uncertainty rather than declining). Faithfulness
-and Answer Relevance both operate on an item in isolation and don't
-catch this -- a hallucinated item can be perfectly self-consistent.
+*mitochondria*. Faithfulness and Answer Relevance both operate on an
+item in isolation and don't catch this -- a hallucinated item can be
+perfectly self-consistent.
 
 `generation/topic_filter.py::detect_off_topic_indices` catches this with
-one batched embed() call per group: each item's question+correct_answer
-is compared (max cosine similarity) against every retrieved context
-chunk, and anything below `PipelineConfig.off_topic_similarity_threshold`
-(default 0.3, loosely calibrated -- tune against your own runs) is
-dropped before eval, logged as a `parse_failure`-style event
-(`stage: "detect_off_topic"`) with the dropped question text included.
+one batched embed() call per group: each candidate question's
+question+correct_answer is compared (max cosine similarity) against
+every retrieved context chunk, and anything below
+`PipelineConfig.off_topic_similarity_threshold` (default 0.3, loosely
+calibrated -- tune against your own runs) is dropped.
+
+**Runs right after `generate_questions`, before `generate_distractors`**
+(moved there after a real run showed why placement matters): if this
+check only ran after the full item was assembled, a downstream JSON
+truncation failure (see "Token budget" below) could drop the whole group
+before the off-topic filter ever got a chance to run, silently masking
+which of the two problems actually caused a given failure. Running it
+earlier also means a distractor-generation call is never wasted on a
+question that's about to be dropped anyway. Locked in end to end with a
+scripted-backend integration test
+(`tests/test_pipeline_integration.py`) that deliberately combines a
+parse failure AND an off-topic item in the same batch -- this also
+caught a real indexing bug introduced during the move (stale positional
+indices from before the off-topic filter being reused to index into the
+list *after* filtering), now fixed and regression-tested.
+
+## Token budget -- a confirmed real incident
+
+A load test found `generate_distractors` calls whose `completion_tokens`
+landed on EXACTLY `150 * num_questions` for several failed batches (7,
+8, and 9 questions) -- not a coincidence: the model was being cut off
+mid-JSON by `max_tokens` before the array could close, so the entire
+batch failed to parse (100% loss, not partial) purely from budget being
+too tight for 3 distractor texts + JSON structural overhead per item.
+Bumped to `300 * num_questions` for distractors and `260 * num_questions`
+for questions (which wasn't failing outright but was running close,
+~78% utilization observed in the same run).
+
+`CallTelemetry.hit_token_limit` (`completion_tokens >= max_tokens sent`)
+is now computed automatically for every call in both `VLLMClient` and
+`VastServerlessClient`, and shows up in every `api_call` log line --
+diagnosing this kind of failure no longer requires manually
+cross-referencing completion_tokens against each call site's budget
+formula by hand.
 

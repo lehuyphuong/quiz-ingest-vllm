@@ -157,22 +157,74 @@ async def run_job_streaming(
                 )
             timer.end_stage()
 
+            # Off-topic check moved here (right after generate_questions,
+            # before generate_distractors) rather than after full
+            # assembly: two real benefits confirmed from an actual run.
+            # (1) A distractor-generation call is never wasted on a
+            # question about to be dropped. (2) This check used to be
+            # skippable entirely -- if generate_distractors' JSON got
+            # truncated (see that function's max_tokens docstring for a
+            # real incident), the whole group was dropped BEFORE ever
+            # reaching the off-topic filter, so an off-topic item and a
+            # truncation failure could mask each other in the logs.
+            # Operates on the raw `questions` dicts (not yet assembled
+            # into QuizItem, since distractors don't exist yet).
+            timer.start_stage("detect_off_topic")
+            # valid_questions: parsed-OK items only (q_failures are
+            # positions in the ORIGINAL `questions` list -- this is the
+            # only place that positional indexing is used; everything
+            # downstream keys off each dict's own "index" field instead,
+            # to avoid exactly the kind of position-vs-filtered-list bug
+            # this comment is here to warn about).
+            valid_questions = [q for i, q in enumerate(questions) if i not in q_failures]
+            off_topic_indices = await detect_off_topic_indices(
+                embed_backend, items=valid_questions, context_chunks=context_chunks,
+                threshold=config.off_topic_similarity_threshold,
+            )
+            if off_topic_indices:
+                log_parse_failure(
+                    stage="detect_off_topic",
+                    raw_text=(
+                        f"[dropped {len(off_topic_indices)} question(s) with low similarity "
+                        f"to any retrieved context chunk] "
+                        + "; ".join(
+                            f"index={q.get('index')} question={q.get('question', '')!r}"
+                            for q in valid_questions if q.get("index") in off_topic_indices
+                        )
+                    )[:4000],
+                    failed_indices=sorted(off_topic_indices),
+                    total_count=len(valid_questions),
+                )
+            # surviving_questions: parsed-OK AND on-topic. Everything from
+            # here on uses THIS list and its dicts' own "index" fields --
+            # never q_failures/d_failures as positions into a list that's
+            # been filtered since they were computed.
+            surviving_questions = [q for q in valid_questions if q.get("index") not in off_topic_indices]
+            timer.end_stage()
+            if not surviving_questions:
+                remaining -= group_size
+                continue
+
             timer.start_stage("generate_distractors")
             distractors, d_telemetry, d_failures, d_raw = await generate_distractor_batch(
-                gen_backend, shared_prefix=shared_prefix, questions=questions
+                gen_backend, shared_prefix=shared_prefix, questions=surviving_questions
             )
             _log(d_telemetry, stage="generate_distractors")
             if d_failures:
                 log_parse_failure(
                     stage="generate_distractors", raw_text=d_raw,
-                    failed_indices=d_failures, total_count=len(questions),
+                    failed_indices=d_failures, total_count=len(surviving_questions),
                 )
             timer.end_stage()
 
-            dropped = {questions[i].get("index") for i in q_failures} | {
-                questions[i].get("index") for i in d_failures if i < len(questions)
+            # d_failures are positions in surviving_questions (exactly
+            # what was sent to generate_distractor_batch above) -- safe
+            # to index with here since surviving_questions hasn't changed
+            # since that call.
+            dropped = {
+                surviving_questions[i].get("index") for i in d_failures if i < len(surviving_questions)
             }
-            items = assemble_quiz_items(questions, distractors, dropped, context_chunks)
+            items = assemble_quiz_items(surviving_questions, distractors, dropped, context_chunks)
             if not items:
                 log_parse_failure(
                     stage="assemble_quiz_items",
@@ -184,31 +236,6 @@ async def run_job_streaming(
                     failed_indices=list(range(group_size)),
                     total_count=group_size,
                 )
-                remaining -= group_size
-                continue
-
-            timer.start_stage("detect_off_topic")
-            off_topic_indices = await detect_off_topic_indices(
-                embed_backend, items=items, context_chunks=context_chunks,
-                threshold=config.off_topic_similarity_threshold,
-            )
-            if off_topic_indices:
-                log_parse_failure(
-                    stage="detect_off_topic",
-                    raw_text=(
-                        f"[dropped {len(off_topic_indices)} item(s) with low similarity "
-                        f"to any retrieved context chunk] "
-                        + "; ".join(
-                            f"index={it.index} question={it.question!r}"
-                            for it in items if it.index in off_topic_indices
-                        )
-                    )[:4000],
-                    failed_indices=sorted(off_topic_indices),
-                    total_count=len(items),
-                )
-                items = [it for it in items if it.index not in off_topic_indices]
-            timer.end_stage()
-            if not items:
                 remaining -= group_size
                 continue
 

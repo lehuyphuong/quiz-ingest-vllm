@@ -44,6 +44,13 @@ class CallTelemetry:
     wall_time_s: float
     prefix_cache_hit_tokens: int | None = None  # from vLLM's usage extension, when the server reports it
     retry_count: int = 0
+    hit_token_limit: bool = False  # completion_tokens == the max_tokens sent for this call --
+    # a strong signal of truncation (the response was very likely cut off
+    # mid-content, not that the model naturally finished at that exact
+    # length). Computed automatically in vllm_client.py -- see that
+    # file's docstring for a real incident this would have caught
+    # instantly instead of requiring manual completion_tokens-vs-budget
+    # cross-referencing across several log entries.
 
 
 @dataclass

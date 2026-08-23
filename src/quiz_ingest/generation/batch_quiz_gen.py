@@ -108,7 +108,12 @@ async def generate_question_batch(
         shared_prefix=prompt_prefix,
         item_prompts=item_prompts,
         schema_hint=QUESTION_SCHEMA_HINT,
-        max_tokens=200 * batch_size,
+        # 260/question, not 200 -- 200 was cutting it close in real runs
+        # (up to ~78% utilization observed) even where it didn't fully
+        # truncate; supporting_fact in particular can run long. See
+        # generate_distractor_batch's docstring for a case where a tight
+        # budget caused 100% batch failure, not just a close call.
+        max_tokens=260 * batch_size,
     )
     return result.items, result.telemetry, result.parse_failures, result.raw_text
 
@@ -132,7 +137,15 @@ async def generate_distractor_batch(
         shared_prefix=shared_prefix,
         item_prompts=item_prompts,
         schema_hint=DISTRACTOR_SCHEMA_HINT,
-        max_tokens=150 * len(questions),
+        # 300/question, not 150 -- 150 was CONFIRMED to cause 100% batch
+        # failure in real runs: a real load test found completion_tokens
+        # landing EXACTLY on 150*n for several failed batches (9, 8, and
+        # 7 questions), meaning the model was cut off mid-JSON before the
+        # array could close, so _parse_json_array_batch's bracket search
+        # failed and EVERY item in the batch was marked a parse failure --
+        # not a partial loss, a total one, purely from budget being too
+        # tight for 3 distractor texts + JSON structural overhead per item.
+        max_tokens=300 * len(questions),
     )
     return result.items, result.telemetry, result.parse_failures, result.raw_text
 

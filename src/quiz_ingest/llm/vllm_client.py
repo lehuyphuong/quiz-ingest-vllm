@@ -176,6 +176,7 @@ class VLLMClient:
                     wall_time_s=wall_time,
                     prefix_cache_hit_tokens=prefix_hit_tokens,
                     retry_count=attempt,
+                    hit_token_limit=(completion_tokens >= max_tokens > 0),
                 )
                 return full_text, telemetry
 

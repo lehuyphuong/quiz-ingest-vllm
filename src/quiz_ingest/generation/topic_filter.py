@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from quiz_ingest.generation.batch_quiz_gen import QuizItem
 from quiz_ingest.ingest.chunking import Chunk
 from quiz_ingest.llm.base import LLMBackend
 
@@ -41,7 +40,7 @@ DEFAULT_OFF_TOPIC_SIMILARITY_THRESHOLD = 0.3
 async def detect_off_topic_indices(
     embed_backend: LLMBackend,
     *,
-    items: list[QuizItem],
+    items,
     context_chunks: list[Chunk],
     threshold: float = DEFAULT_OFF_TOPIC_SIMILARITY_THRESHOLD,
 ) -> set[int]:
@@ -52,11 +51,24 @@ async def detect_off_topic_indices(
     legitimate, since retrieval already narrowed context_chunks down to
     the top_k most relevant for the whole job, not all of which are
     relevant to any single question.
+
+    `items` accepts EITHER the raw dicts generate_question_batch returns
+    (has "index"/"question"/"correct_answer" keys) OR QuizItem objects
+    (same names, as attributes) -- called on the raw dicts in practice,
+    right after generate_question_batch and BEFORE generate_distractor_batch,
+    so a distractor-generation call is never wasted on a question that's
+    about to be dropped, and so this check isn't skipped when a
+    downstream stage (e.g. distractor JSON truncation -- a real incident
+    that happened) fails before ever reaching it.
     """
     if not items or not context_chunks:
         return set()
 
-    item_texts = [f"{it.question} {it.correct_answer}" for it in items]
+    def _get(item, key: str):
+        return item.get(key, "") if isinstance(item, dict) else getattr(item, key, "")
+
+    item_texts = [f"{_get(it, 'question')} {_get(it, 'correct_answer')}" for it in items]
+    indices = [_get(it, "index") for it in items]
     context_texts = [c.text for c in context_chunks]
     vectors, _telemetry = await embed_backend.embed(item_texts + context_texts)
 
@@ -68,4 +80,4 @@ async def detect_off_topic_indices(
     sims = item_unit @ context_unit.T  # (n_items, n_chunks)
     max_sim_per_item = sims.max(axis=1)
 
-    return {it.index for it, max_sim in zip(items, max_sim_per_item) if max_sim < threshold}
+    return {idx for idx, max_sim in zip(indices, max_sim_per_item) if max_sim < threshold}
