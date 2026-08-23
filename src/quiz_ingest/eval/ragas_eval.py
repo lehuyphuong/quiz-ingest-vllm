@@ -79,7 +79,17 @@ async def score_faithfulness_and_relevance(
         shared_prefix=shared_prefix,
         item_prompts=decompose_prompts,
         schema_hint=_STATEMENT_SCHEMA,
-        max_tokens=150 * len(items),
+        # 280/item, not 150 -- 150 was CONFIRMED too tight for the same
+        # reason distractor generation was (see batch_quiz_gen.py's
+        # generate_distractor_batch docstring for that first incident):
+        # a load test found completion_tokens landing on EXACT multiples
+        # of 150 (450, 750, 900, 1500...) for several failed decompose
+        # calls, meaning truncation, not natural completion. Technical/
+        # formula-heavy source content (e.g. the multi-head attention
+        # equations in the sample PDF) decomposes into more, longer
+        # atomic statements than average prose, and 150/item didn't
+        # leave enough room.
+        max_tokens=280 * len(items),
     )
     telemetries.append(decompose_result.telemetry)
     if decompose_result.parse_failures:
