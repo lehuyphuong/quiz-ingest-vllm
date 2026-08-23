@@ -471,3 +471,26 @@ diagnosing this kind of failure no longer requires manually
 cross-referencing completion_tokens against each call site's budget
 formula by hand.
 
+
+## Closing the diagnostic gap: eval-stage and repair-exhausted failures now logged
+
+A load test's `delivered/requested` gap (34 items missing) vastly
+exceeded its `parse_failure` event count (1) -- most of the loss was
+happening in two code paths that detected failures internally but never
+logged them:
+
+- `eval/ragas_eval.py`'s 3 internal calls (decompose, verify,
+  reverse-question) tracked parse failures via `excluded_indices` but
+  never called `log_parse_failure` -- an item silently excluded from
+  scoring during eval left no trace of *why*. Now logs
+  `stage: "eval_decompose"` / `"eval_verify"` / `"eval_reverse_question"`
+  with the raw model output, same as every other stage.
+- `repair_duplicate_distractors` silently dropped items still duplicated
+  after exhausting `max_retries` -- now logs
+  `stage: "repair_distractors_exhausted"` with the dropped questions.
+
+If `delivered_total` is still well below `requested_total` after
+upgrading, `grep '"event": "parse_failure"' logs/*.jsonl | python3 -c
+"import json,sys,collections; print(collections.Counter(json.loads(l)['stage'] for l in sys.stdin))"`
+now gives a complete stage-by-stage breakdown instead of missing most of
+the loss.

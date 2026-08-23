@@ -37,6 +37,7 @@ import numpy as np
 
 from quiz_ingest.generation.batch_quiz_gen import QuizItem
 from quiz_ingest.llm.base import LLMBackend
+from quiz_ingest.logging_setup import log_parse_failure
 
 _STATEMENT_SCHEMA = '{"index": <int>, "statements": [<string>, ...]}'
 _VERIFY_SCHEMA = '{"index": <int>, "verdicts": [<0 or 1 per statement, in order>]}'
@@ -81,6 +82,11 @@ async def score_faithfulness_and_relevance(
         max_tokens=150 * len(items),
     )
     telemetries.append(decompose_result.telemetry)
+    if decompose_result.parse_failures:
+        log_parse_failure(
+            stage="eval_decompose", raw_text=decompose_result.raw_text,
+            failed_indices=decompose_result.parse_failures, total_count=len(items),
+        )
     excluded |= {items[i].index for i in decompose_result.parse_failures}
     statements_by_index = {
         items[i].index: obj.get("statements", [])
@@ -121,6 +127,11 @@ async def score_faithfulness_and_relevance(
             max_tokens=100 * len(verify_prompts),
         )
         telemetries.append(verify_result.telemetry)
+        if verify_result.parse_failures:
+            log_parse_failure(
+                stage="eval_verify", raw_text=verify_result.raw_text,
+                failed_indices=verify_result.parse_failures, total_count=len(verify_prompts),
+            )
         excluded |= {verify_items_order[i].index for i in verify_result.parse_failures}
         for i, obj in enumerate(verify_result.items):
             if i in verify_result.parse_failures:
@@ -142,6 +153,11 @@ async def score_faithfulness_and_relevance(
         max_tokens=100 * len(items),
     )
     telemetries.append(reverse_result.telemetry)
+    if reverse_result.parse_failures:
+        log_parse_failure(
+            stage="eval_reverse_question", raw_text=reverse_result.raw_text,
+            failed_indices=reverse_result.parse_failures, total_count=len(items),
+        )
     excluded |= {items[i].index for i in reverse_result.parse_failures}
 
     # Build ONE embed() call for original questions + all reverse-questions

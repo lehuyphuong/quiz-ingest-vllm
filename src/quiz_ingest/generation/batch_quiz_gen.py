@@ -30,6 +30,7 @@ from quiz_ingest.generation.schemas import (
 )
 from quiz_ingest.ingest.chunking import Chunk
 from quiz_ingest.llm.base import CallTelemetry, LLMBackend
+from quiz_ingest.logging_setup import log_parse_failure
 
 QUESTION_BATCH_SIZE = 8
 
@@ -271,4 +272,15 @@ async def repair_duplicate_distractors(
         bad = still_bad
 
     # Anything still bad after all retries is dropped, not delivered.
+    if bad:
+        log_parse_failure(
+            stage="repair_distractors_exhausted",
+            raw_text=(
+                f"[dropped {len(bad)} item(s) after {max_retries} repair "
+                f"attempt(s) -- still duplicated or still failing to parse] "
+                + "; ".join(f"index={it.index} question={it.question!r}" for it in bad)
+            )[:4000],
+            failed_indices=[it.index for it in bad],
+            total_count=len(items),
+        )
     return ok, telemetries
