@@ -30,14 +30,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pdf", required=True)
     p.add_argument("--topic", required=True, help="Used to guide retrieval/rerank within the PDF")
     p.add_argument("--num-questions", type=int, default=5)
-    p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--vllm-base-url", required=True)
+    p.add_argument("--batch-size", type=int, default=10)
+    p.add_argument("--vllm-base-url", default=None, help="Required when --backend instance (default)")
     p.add_argument("--embed-base-url", default=None)
     p.add_argument("--model", default="Qwen/Qwen3-4B-Instruct-2507")
     p.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-0.6B")
     p.add_argument("--chunk-size", type=int, default=1000)
     p.add_argument("--chunk-overlap", type=int, default=150)
     p.add_argument("--top-k", type=int, default=12)
+    p.add_argument(
+        "--backend", choices=["instance", "serverless"], default="instance",
+        help="'instance' talks to a plain rented GPU (--vllm-base-url). "
+        "'serverless' talks to Vast Serverless Endpoints (--vast-endpoint-name).",
+    )
+    p.add_argument("--vast-endpoint-name", default=None, help="Required when --backend serverless")
+    p.add_argument(
+        "--vast-embed-endpoint-name", default=None,
+        help="Defaults to --vast-endpoint-name if omitted (only valid if that "
+        "one endpoint also serves the embedding model, which it normally "
+        "won't -- see README, generation and embedding are separate vLLM processes)",
+    )
     p.add_argument(
         "--output-json",
         default=None,
@@ -50,10 +62,17 @@ def parse_args() -> argparse.Namespace:
 
 async def main() -> None:
     args = parse_args()
+    if args.backend == "instance" and not args.vllm_base_url:
+        raise SystemExit("--vllm-base-url is required when --backend instance (the default)")
+    if args.backend == "serverless" and not args.vast_endpoint_name:
+        raise SystemExit("--vast-endpoint-name is required when --backend serverless")
+
     config = PipelineConfig(
-        backend="instance",
+        backend=args.backend,
         vllm_base_url=args.vllm_base_url,
         embed_base_url=args.embed_base_url or args.vllm_base_url,
+        vast_endpoint_name=args.vast_endpoint_name,
+        vast_embed_endpoint_name=args.vast_embed_endpoint_name or args.vast_endpoint_name,
         model=args.model,
         embed_model=args.embed_model,
         num_questions=args.num_questions,

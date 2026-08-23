@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-MAX_NUM_QUESTIONS = 50
+MAX_NUM_QUESTIONS = 10
 MAX_TOPIC_CHARS = 200
 
 
@@ -34,7 +34,12 @@ class PipelineConfig:
 
     # generation
     num_questions: int = 5
-    batch_size: int = 8
+    batch_size: int = 10  # >= MAX_NUM_QUESTIONS by default -- a single job
+    # never splits into multiple generate_questions groups, which
+    # sidesteps the cross-group duplicate-question failure mode entirely
+    # (see generation/batch_quiz_gen.py's avoid-repeat addendum -- that
+    # mechanism still exists as a second line of defense, but isn't
+    # needed in the common case if batch_size covers the whole request).
     chunk_size: int = 1000
     chunk_overlap: int = 150
     retrieve_top_k: int = 12

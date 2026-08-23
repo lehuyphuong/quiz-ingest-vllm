@@ -329,3 +329,82 @@ cases), item-assembly drop logic, and eval-score exclusion, using a fake
 - No chunk_size/retrieve_top_k sweep yet — Faithfulness depends on
   retrieval quality as much as on the generation model; only the
   generation side has been benchmarked so far.
+
+## Demo API (Swagger UI) -- sharing a public link
+
+```bash
+pip install -e ".[api]"
+
+# instance mode
+export QUIZ_BACKEND=instance
+export VLLM_BASE_URL=http://localhost:8000
+export EMBED_BASE_URL=http://localhost:8001
+# OR serverless mode
+export QUIZ_BACKEND=serverless
+export VAST_API_KEY=...
+export VAST_ENDPOINT_NAME=quiz-gen-qwen3-4b
+export VAST_EMBED_ENDPOINT_NAME=quiz-embed-qwen3
+
+# strongly recommended before exposing this on a public IP -- see
+# api.py's _require_api_key docstring for why
+export DEMO_API_KEY=<a secret you make up>
+
+python scripts/demo_server.py --host 0.0.0.0 --port 8080
+```
+
+Then share `http://<this-machine's-ip>:8080/docs` -- a Swagger UI with
+one `POST /generate-quiz` endpoint (upload a PDF, set topic/num_questions,
+"Try it out") and `GET /health`. The response body is the exact same
+consolidated JSON `generate_quiz_from_pdf.py` writes to disk (see
+"Consolidated per-job JSON output" above) -- read back from that file,
+not rebuilt separately, so the two can't drift into different schemas.
+
+The backend (instance vs serverless, model names) is configured **once,
+server-side**, via the environment variables above -- never something the
+person hitting the API supplies. `num_questions` is still capped at
+`MAX_NUM_QUESTIONS` (10) and validated by FastAPI itself (a request over
+the cap gets a `422`, not silently clamped).
+
+**This is a demo server, not a hardened production API**: no request
+queueing (concurrent requests all hit the backend directly -- fine for
+one person trying it, not for real traffic), no rate limiting, `DEMO_API_KEY`
+is a single shared secret (not per-user), and no HTTPS termination (put
+this behind a reverse proxy -- e.g. Caddy or nginx -- for anything beyond
+a quick demo link). `tests/test_api.py` covers the routing/validation
+logic with a mocked pipeline -- it does not exercise a real backend.
+
+## Load testing (concurrent users)
+
+```bash
+python scripts/load_test.py \
+    --pdf test_docs/sample.pdf \
+    --vllm-base-url http://localhost:8000 --embed-base-url http://localhost:8001 \
+    --concurrency-levels 1 2 4 8 16 32 \
+    --requests-per-level 20
+```
+
+Runs N *real, end-to-end* `run_job()` calls concurrently at each level in
+`--concurrency-levels` (capped by an `asyncio.Semaphore`, verified in
+`tests/test_load_test.py` to never exceed the cap) -- this exercises the
+actual retrieval + batched generation + eval + repair path, not a
+synthetic raw-completion benchmark, so the "how many concurrent users"
+number reflects the real pipeline.
+
+Each simulated user gets a randomized topic (varies retrieved context
+size) and randomized `num_questions`/`retrieve_top_k` (varies prompt
+size) -- deliberately not identical repeated requests, which would give
+an unrealistically rosy result via prefix-cache reuse across "different
+users" that wouldn't happen with real, distinct traffic.
+
+Per level, reports success rate, p50/p95/max latency (including queue
+wait time -- a request stuck waiting for a slot IS the degradation this
+tool exists to catch), and mean decode tokens/s (read back from
+`logs/*.jsonl`'s real per-call telemetry, not re-measured). Auto-stops
+once a level's success rate drops below `--degradation-success-rate`
+(default 0.8) or p95 latency exceeds `--degradation-latency-multiplier`
+(default 3x) the first level's, and prints an estimated sustainable
+concurrency -- treat that as a starting point for a longer soak test,
+not a final capacity number for a single ~20-request-per-level sample.
+
+Writes a per-level JSON summary to `logs/load_test_summary_<ts>.json`.
+
