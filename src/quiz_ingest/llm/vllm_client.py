@@ -256,23 +256,40 @@ class VLLMClient:
 def _parse_json_array_batch(raw_text: str, expected_len: int) -> tuple[list[dict], list[int]]:
     """
     Parses a JSON array out of `raw_text`, tolerating the model wrapping it
-    in prose or markdown fences. Returns (items, failed_indices) -- items
-    shorter than expected_len are padded with {} so callers can align by
-    position; failed_indices records which slots are placeholders so
-    downstream eval code can EXCLUDE them from scoring instead of silently
-    treating a placeholder as a real 0.0 score (see repo README's incident
-    #13 in the earlier quizrag-scale project for why this distinction
-    matters).
+    in prose or markdown fences BEFORE the array, and (this is the part
+    that matters here) trailing prose AFTER it too. Returns (items,
+    failed_indices) -- items shorter than expected_len are padded with {}
+    so callers can align by position; failed_indices records which slots
+    are placeholders so downstream eval code can EXCLUDE them from
+    scoring instead of silently treating a placeholder as a real 0.0
+    score (see repo README's incident #13 in the earlier quizrag-scale
+    project for why this distinction matters).
+
+    Uses json.JSONDecoder().raw_decode() instead of text.find("[") +
+    text.rfind("]") + json.loads() on the slice between them -- rfind was
+    a real bug, confirmed from a load test's logs: when the model appends
+    a trailing disclaimer sentence that happens to itself contain bracket
+    characters (observed verbatim: "...] The provided reference context
+    does not contain any information about [topic]. ... Output: []"),
+    rfind("]") grabs the LAST bracket in the whole text -- the one from
+    "Output: []" -- not the one that actually closes the real array. The
+    resulting slice spans across the prose in between, which is not valid
+    JSON, so json.loads() failed and the ENTIRE batch was marked a parse
+    failure even though the model had produced a fully valid array right
+    up until that trailing sentence. raw_decode() parses forward from the
+    first "[" and stops exactly where the JSON value ends, ignoring
+    whatever comes after -- immune to this class of bug regardless of
+    what characters appear in any trailing text.
     """
     text = raw_text.strip()
     start = text.find("[")
-    end = text.rfind("]")
     parsed: list = []
-    if start != -1 and end != -1 and end > start:
-        candidate = text[start : end + 1]
+    if start != -1:
         try:
-            parsed = json.loads(candidate)
+            parsed, _end_index = json.JSONDecoder().raw_decode(text[start:])
         except json.JSONDecodeError:
+            parsed = []
+        if not isinstance(parsed, list):
             parsed = []
 
     items: list[dict] = []

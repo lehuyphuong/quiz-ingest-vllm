@@ -235,10 +235,12 @@ async def test_detect_off_topic_indices_flags_dissimilar_item():
     ]
     backend = FakeBackend(generate_responses=[], embed_vectors=embed_vectors)
 
-    off_topic = await detect_off_topic_indices(
+    off_topic, similarities = await detect_off_topic_indices(
         backend, items=items, context_chunks=context_chunks, threshold=0.3
     )
     assert off_topic == {1}
+    assert similarities[0] > 0.3  # on-topic item stays above threshold
+    assert similarities[1] < 0.3  # off-topic item flagged below threshold
 
 
 @pytest.mark.asyncio
@@ -246,7 +248,9 @@ async def test_detect_off_topic_indices_empty_inputs_return_empty_set():
     from quiz_ingest.generation.topic_filter import detect_off_topic_indices
 
     backend = FakeBackend(generate_responses=[], embed_vectors=[])
-    assert await detect_off_topic_indices(backend, items=[], context_chunks=[]) == set()
+    off_topic, similarities = await detect_off_topic_indices(backend, items=[], context_chunks=[])
+    assert off_topic == set()
+    assert similarities == {}
 
 
 class FakeDistractorRepairBackend:

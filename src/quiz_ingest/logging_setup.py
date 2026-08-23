@@ -58,6 +58,26 @@ def log_parse_failure(
         f.write(json.dumps(record) + "\n")
 
 
+def log_off_topic_scores(*, similarities: dict, threshold: float) -> None:
+    """
+    Logged every time detect_off_topic_indices runs, regardless of
+    outcome -- unlike log_parse_failure, this fires even when nothing
+    gets flagged. The threshold in generation/topic_filter.py is untested
+    against a labeled dataset; this is what real calibration data looks
+    like -- grep logs/*.jsonl for "event": "off_topic_check" and look at
+    the actual similarity distribution before tuning the threshold
+    instead of guessing.
+    """
+    record = {
+        "event": "off_topic_check",
+        "ts": time.time(),
+        "threshold": threshold,
+        "similarities": similarities,  # {index: max_cosine_similarity}
+    }
+    with open(_log_path(), "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def log_api_call(telemetry: CallTelemetry, *, stage: str, extra: dict | None = None) -> None:
     record = {"event": "api_call", "stage": stage, "ts": time.time(), **asdict(telemetry)}
     if extra:

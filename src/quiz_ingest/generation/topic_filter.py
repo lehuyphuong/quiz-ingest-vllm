@@ -43,7 +43,7 @@ async def detect_off_topic_indices(
     items,
     context_chunks: list[Chunk],
     threshold: float = DEFAULT_OFF_TOPIC_SIMILARITY_THRESHOLD,
-) -> set[int]:
+) -> tuple[set[int], dict[int, float]]:
     """
     ONE batched embed() call for all items + all context chunks. For each
     item, takes the MAX cosine similarity across all context chunks (not
@@ -51,6 +51,13 @@ async def detect_off_topic_indices(
     legitimate, since retrieval already narrowed context_chunks down to
     the top_k most relevant for the whole job, not all of which are
     relevant to any single question.
+
+    Returns (off_topic_indices, similarities) -- similarities maps every
+    item's index to its actual max-similarity score, not just the ones
+    that got flagged, so callers can log the real distribution and
+    calibrate `threshold` against real runs instead of guessing (this
+    threshold is untested against a labeled dataset -- see module
+    docstring).
 
     `items` accepts EITHER the raw dicts generate_question_batch returns
     (has "index"/"question"/"correct_answer" keys) OR QuizItem objects
@@ -62,7 +69,7 @@ async def detect_off_topic_indices(
     that happened) fails before ever reaching it.
     """
     if not items or not context_chunks:
-        return set()
+        return set(), {}
 
     def _get(item, key: str):
         return item.get(key, "") if isinstance(item, dict) else getattr(item, key, "")
@@ -80,4 +87,6 @@ async def detect_off_topic_indices(
     sims = item_unit @ context_unit.T  # (n_items, n_chunks)
     max_sim_per_item = sims.max(axis=1)
 
-    return {idx for idx, max_sim in zip(indices, max_sim_per_item) if max_sim < threshold}
+    similarities = {idx: float(max_sim) for idx, max_sim in zip(indices, max_sim_per_item)}
+    off_topic = {idx for idx, max_sim in similarities.items() if max_sim < threshold}
+    return off_topic, similarities

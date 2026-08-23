@@ -29,7 +29,13 @@ from quiz_ingest.ingest.chunking import chunk_text
 from quiz_ingest.ingest.pdf_source import extract_pdf_text
 from quiz_ingest.llm.base import CallTelemetry, LLMBackend
 from quiz_ingest.llm.vllm_client import VLLMClient, VLLMClientConfig
-from quiz_ingest.logging_setup import JobTimer, log_api_call, log_job_summary, log_parse_failure
+from quiz_ingest.logging_setup import (
+    JobTimer,
+    log_api_call,
+    log_job_summary,
+    log_off_topic_scores,
+    log_parse_failure,
+)
 from quiz_ingest.output_writer import build_job_output, write_job_output_json
 from quiz_ingest.rag.index import RagIndex
 
@@ -177,9 +183,12 @@ async def run_job_streaming(
             # to avoid exactly the kind of position-vs-filtered-list bug
             # this comment is here to warn about).
             valid_questions = [q for i, q in enumerate(questions) if i not in q_failures]
-            off_topic_indices = await detect_off_topic_indices(
+            off_topic_indices, off_topic_similarities = await detect_off_topic_indices(
                 embed_backend, items=valid_questions, context_chunks=context_chunks,
                 threshold=config.off_topic_similarity_threshold,
+            )
+            log_off_topic_scores(
+                similarities=off_topic_similarities, threshold=config.off_topic_similarity_threshold
             )
             if off_topic_indices:
                 log_parse_failure(
