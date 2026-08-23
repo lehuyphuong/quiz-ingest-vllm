@@ -24,6 +24,7 @@ from quiz_ingest.generation.batch_quiz_gen import (
     generate_question_batch,
     repair_duplicate_distractors,
 )
+from quiz_ingest.generation.topic_filter import detect_off_topic_indices
 from quiz_ingest.ingest.chunking import chunk_text
 from quiz_ingest.ingest.pdf_source import extract_pdf_text
 from quiz_ingest.llm.base import CallTelemetry, LLMBackend
@@ -183,6 +184,31 @@ async def run_job_streaming(
                     failed_indices=list(range(group_size)),
                     total_count=group_size,
                 )
+                remaining -= group_size
+                continue
+
+            timer.start_stage("detect_off_topic")
+            off_topic_indices = await detect_off_topic_indices(
+                embed_backend, items=items, context_chunks=context_chunks,
+                threshold=config.off_topic_similarity_threshold,
+            )
+            if off_topic_indices:
+                log_parse_failure(
+                    stage="detect_off_topic",
+                    raw_text=(
+                        f"[dropped {len(off_topic_indices)} item(s) with low similarity "
+                        f"to any retrieved context chunk] "
+                        + "; ".join(
+                            f"index={it.index} question={it.question!r}"
+                            for it in items if it.index in off_topic_indices
+                        )
+                    )[:4000],
+                    failed_indices=sorted(off_topic_indices),
+                    total_count=len(items),
+                )
+                items = [it for it in items if it.index not in off_topic_indices]
+            timer.end_stage()
+            if not items:
                 remaining -= group_size
                 continue
 

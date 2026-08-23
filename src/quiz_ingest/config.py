@@ -44,6 +44,12 @@ class PipelineConfig:
     chunk_overlap: int = 150
     retrieve_top_k: int = 12
 
+    # Coarse embedding-similarity sanity check -- drops items whose
+    # question+correct_answer isn't grounded in ANY retrieved chunk (see
+    # generation/topic_filter.py). Loosely calibrated; tune against your
+    # own runs.
+    off_topic_similarity_threshold: float = 0.3
+
     # vLLM server-side flags this repo ASSUMES are set when the instance
     # was started (documented here so a mismatch is easy to spot, not
     # enforced in code -- see scripts/README's `vllm serve` command):

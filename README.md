@@ -380,31 +380,64 @@ python scripts/load_test.py \
     --pdf test_docs/sample.pdf \
     --vllm-base-url http://localhost:8000 --embed-base-url http://localhost:8001 \
     --concurrency-levels 1 2 4 8 16 32 \
-    --requests-per-level 20
+    --requests-per-worker 5
 ```
 
-Runs N *real, end-to-end* `run_job()` calls concurrently at each level in
-`--concurrency-levels` (capped by an `asyncio.Semaphore`, verified in
-`tests/test_load_test.py` to never exceed the cap) -- this exercises the
-actual retrieval + batched generation + eval + repair path, not a
-synthetic raw-completion benchmark, so the "how many concurrent users"
-number reflects the real pipeline.
+**Methodology** (fixed after a real run exposed a measurement artifact
+in an earlier version): total requests SCALE with concurrency
+(`concurrency * requests_per_worker`), not a fixed pool shared across
+every level. `concurrency` worker coroutines run in parallel, each
+firing its own requests sequentially -- so exactly `concurrency`
+requests are genuinely in flight at any instant (true steady state). An
+earlier version fired a fixed total at every level through one shared
+queue; at low concurrency most of that fixed pool spent most of its
+measured time waiting in line, not being processed, which made latency
+look like it improved dramatically as concurrency increased -- it
+didn't, the queue just got shorter. Verified in
+`tests/test_load_test.py` (`test_run_level_total_requests_scales_with_concurrency`).
 
-Each simulated user gets a randomized topic (varies retrieved context
-size) and randomized `num_questions`/`retrieve_top_k` (varies prompt
-size) -- deliberately not identical repeated requests, which would give
-an unrealistically rosy result via prefix-cache reuse across "different
-users" that wouldn't happen with real, distinct traffic.
+**`delivery_rate`, not just `success_rate`.** A job that completes
+without raising an exception can still deliver ZERO of the questions it
+was asked for (parse failures, off-topic content dropped, distractors
+that couldn't be repaired). A real run surfaced this directly: every
+job reported `success_rate=1.0` while 71% of jobs delivered nothing --
+`delivery_rate` (`delivered_total / requested_total`) is now a primary,
+always-printed column and part of the auto-stop degradation check
+(`--degradation-delivery-rate`, default 0.5), not an afterthought.
+Regression-tested in `test_summarize_level_delivery_rate_can_be_zero_despite_perfect_success_rate`.
 
-Per level, reports success rate, p50/p95/max latency (including queue
-wait time -- a request stuck waiting for a slot IS the degradation this
-tool exists to catch), and mean decode tokens/s (read back from
-`logs/*.jsonl`'s real per-call telemetry, not re-measured). Auto-stops
-once a level's success rate drops below `--degradation-success-rate`
-(default 0.8) or p95 latency exceeds `--degradation-latency-multiplier`
-(default 3x) the first level's, and prints an estimated sustainable
-concurrency -- treat that as a starting point for a longer soak test,
-not a final capacity number for a single ~20-request-per-level sample.
+Each simulated request still gets a randomized topic (varies retrieved
+context size) and randomized `num_questions`/`retrieve_top_k` (varies
+prompt size) -- deliberately not identical repeated requests, which
+would give an unrealistically rosy result via prefix-cache reuse that
+real, distinct traffic wouldn't get.
 
-Writes a per-level JSON summary to `logs/load_test_summary_<ts>.json`.
+Per level, reports success rate, delivery rate, p50/p95/max latency
+(true per-request service time now, not queue-wait-inflated), and mean
+decode tokens/s (read back from `logs/*.jsonl`'s real per-call
+telemetry). Writes a per-level JSON summary to
+`logs/load_test_summary_<ts>.json`. If `delivery_rate` looks low at any
+level, grep `logs/*.jsonl` for `"event": "parse_failure"` -- every entry
+includes the raw model output that failed, not just a pass/fail flag.
+
+## Off-topic / hallucination detection
+
+A load test with randomized topics and low `retrieve_top_k` surfaced a
+real failure mode no eval metric was catching: a request grounded in
+the sample PDF (topic "training efficiency of the transformer")
+produced a fully-formed, validly-structured question about
+*mitochondria* -- the model's own prose even said the context didn't
+contain the requested information, then generated unrelated content
+anyway (a known LLM behavior: falling back to a memorized template
+example under genuine uncertainty rather than declining). Faithfulness
+and Answer Relevance both operate on an item in isolation and don't
+catch this -- a hallucinated item can be perfectly self-consistent.
+
+`generation/topic_filter.py::detect_off_topic_indices` catches this with
+one batched embed() call per group: each item's question+correct_answer
+is compared (max cosine similarity) against every retrieved context
+chunk, and anything below `PipelineConfig.off_topic_similarity_threshold`
+(default 0.3, loosely calibrated -- tune against your own runs) is
+dropped before eval, logged as a `parse_failure`-style event
+(`stage: "detect_off_topic"`) with the dropped question text included.
 

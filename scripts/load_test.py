@@ -2,40 +2,47 @@
 """
 scripts/load_test.py
 
-Load-tests the instance-mode vLLM backend by running N concurrent
-end-to-end quiz-generation jobs (pipeline.run_job) at each concurrency
-level in --concurrency-levels -- this measures "how many concurrent
-users can this handle" against the REAL code path (retrieval, batched
-generation, eval, repair), not a synthetic raw-completion benchmark.
+Load-tests the instance-mode vLLM backend by running `concurrency`
+parallel WORKERS at each level in --concurrency-levels, each worker
+firing --requests-per-worker requests SEQUENTIALLY -- this measures
+"how many concurrent users can this handle" against the REAL code path
+(retrieval, batched generation, eval, repair, off-topic filtering), not
+a synthetic raw-completion benchmark.
 
-Per the team's requirement, each simulated user gets:
-  - a randomized topic (from --topics, or a small built-in list for the
-    "Attention Is All You Need" sample PDF) -- varies CONTEXT SIZE, since
-    different topics retrieve different chunks via RagIndex
-  - a randomized num_questions (1..MAX_NUM_QUESTIONS) and retrieve_top_k
-    (--min-top-k..--max-top-k) -- varies PROMPT SIZE (batch size, context
-    block length)
+METHODOLOGY NOTE (fixed from an earlier version of this script): total
+requests submitted now SCALES with concurrency (concurrency *
+requests_per_worker), not a fixed pool shared across all levels. An
+earlier version fired a fixed --requests-per-level total at every
+concurrency level via one shared queue -- at low concurrency, most of
+those requests spent most of their measured time waiting in line behind
+each other (a burst-arrival artifact), not reflecting real per-request
+service time, which made latency look like it improved dramatically as
+concurrency increased. It didn't; the queue just got shorter. Each
+worker here loops through its own requests one at a time, so at any
+instant exactly `concurrency` requests are genuinely in flight --
+that's the steady-state measurement this tool is meant to produce.
 
-Deliberately NOT identical repeated requests: real users querying
-different topics wouldn't share a cache-friendly prefix the way N copies
-of the same request would, so identical requests would give an
-unrealistically rosy result.
+Per the team's requirement, each request gets a randomized topic
+(varies retrieved context size) and randomized num_questions/top_k
+(varies prompt size) -- deliberately not identical repeated requests,
+see DEFAULT_TOPICS below.
+
+DELIVERY RATE, not just success rate: a job that completes without
+raising an exception can still deliver ZERO of the questions it was
+asked for (parse failures, off-topic content dropped, distractors that
+couldn't be repaired -- see README "Eval score integrity" /
+"Cross-group question dedup" / detect_off_topic_indices). An earlier
+version of this script only reported success_rate (did the job crash?)
+which looked perfect (1.0) even in a real run where 71% of jobs
+delivered nothing. delivery_rate (delivered_total / requested_total) is
+now a primary, always-reported metric, not an afterthought.
 
 Usage:
     python scripts/load_test.py \
         --pdf test_docs/sample.pdf \
         --vllm-base-url http://localhost:8000 --embed-base-url http://localhost:8001 \
         --concurrency-levels 1 2 4 8 16 \
-        --requests-per-level 20
-
-Increase --concurrency-levels gradually and watch p95 latency / success
-rate / mean decode tok/s per level (the last is read back from
-logs/*.jsonl -- the same real per-call telemetry every other script in
-this repo uses, not re-measured here). The script auto-stops once a
-level shows clear degradation (see --degradation-latency-multiplier /
---degradation-success-rate) and reports an estimated sustainable
-concurrency -- treat that as a starting estimate to sanity-check, not a
-guaranteed production number.
+        --requests-per-worker 5
 """
 from __future__ import annotations
 
@@ -68,7 +75,7 @@ DEFAULT_TOPICS = [
 @dataclass
 class JobResult:
     ok: bool
-    wall_s: float
+    wall_s: float  # true per-request service time -- each worker is sequential, so this is never queue-wait-inflated
     requested: int
     top_k: int
     delivered: int = 0
@@ -94,34 +101,33 @@ async def run_one_job(
 
 
 async def run_level(
-    *, concurrency: int, total_requests: int, pdf_path: str, topics: list[str],
+    *, concurrency: int, requests_per_worker: int, pdf_path: str, topics: list[str],
     base_config: PipelineConfig, top_k_range: tuple[int, int],
 ) -> list[JobResult]:
     """
-    Caps true in-flight concurrency at `concurrency` via a Semaphore
-    acquired around the run_job call -- wall_s is measured from BEFORE
-    acquiring the semaphore, so queueing time under load is counted
-    (a request stuck waiting for a slot is exactly the degradation this
-    script exists to detect, not something to hide from the numbers).
+    `concurrency` worker coroutines run in parallel, each firing
+    `requests_per_worker` requests ONE AT A TIME. Total requests at this
+    level = concurrency * requests_per_worker -- scales with concurrency,
+    unlike a fixed shared pool (see module docstring for why that
+    mattered). At any instant, in-flight requests == concurrency exactly
+    (steady state), never more, never fewer once all workers have started.
     """
-    sem = asyncio.Semaphore(concurrency)
 
-    async def _bounded(i: int) -> JobResult:
-        topic = random.choice(topics)
-        num_q = random.randint(1, MAX_NUM_QUESTIONS)
-        top_k = random.randint(*top_k_range)
-        t0 = time.monotonic()
-        async with sem:
+    async def worker(worker_id: int) -> list[JobResult]:
+        results = []
+        for _ in range(requests_per_worker):
+            topic = random.choice(topics)
+            num_q = random.randint(1, MAX_NUM_QUESTIONS)
+            top_k = random.randint(*top_k_range)
             result = await run_one_job(
                 pdf_path=pdf_path, topic=topic, base_config=base_config,
                 num_questions=num_q, top_k=top_k,
             )
-        # wall_s from run_one_job excludes queue wait; overwrite with the
-        # full including-queue-wait duration measured here.
-        result.wall_s = time.monotonic() - t0
-        return result
+            results.append(result)
+        return results
 
-    return list(await asyncio.gather(*(_bounded(i) for i in range(total_requests))))
+    per_worker_results = await asyncio.gather(*(worker(i) for i in range(concurrency)))
+    return [r for worker_results in per_worker_results for r in worker_results]
 
 
 def collect_decode_tps_since(start_ts: float) -> list[float]:
@@ -151,12 +157,20 @@ def summarize_level(results: list[JobResult], decode_tps_samples: list[float]) -
     ok_results = [r for r in results if r.ok]
     latencies = [r.wall_s for r in ok_results]
     success_rate = len(ok_results) / len(results) if results else 0.0
+    delivered_total = sum(r.delivered for r in ok_results)
+    requested_total = sum(r.requested for r in results)
+    delivery_rate = delivered_total / requested_total if requested_total else 0.0
+
     summary = {
         "total_requests": len(results),
         "success_count": len(ok_results),
         "success_rate": round(success_rate, 3),
-        "delivered_total": sum(r.delivered for r in ok_results),
-        "requested_total": sum(r.requested for r in results),
+        # PRIMARY quality signal -- a job that didn't crash can still
+        # deliver nothing it was asked for (see module docstring).
+        # Do not treat success_rate alone as "it worked".
+        "delivered_total": delivered_total,
+        "requested_total": requested_total,
+        "delivery_rate": round(delivery_rate, 3),
     }
     if latencies:
         sorted_lat = sorted(latencies)
@@ -184,7 +198,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", default="Qwen/Qwen3-4B-Instruct-2507")
     p.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-0.6B")
     p.add_argument("--concurrency-levels", type=int, nargs="+", default=[1, 2, 4, 8, 16])
-    p.add_argument("--requests-per-level", type=int, default=20)
+    p.add_argument(
+        "--requests-per-worker", type=int, default=5,
+        help="Each of the `concurrency` workers fires this many requests SEQUENTIALLY. "
+        "Total requests at a level = concurrency * requests-per-worker.",
+    )
     p.add_argument("--min-top-k", type=int, default=4)
     p.add_argument("--max-top-k", type=int, default=20)
     p.add_argument("--topics", nargs="+", default=None, help="Defaults to a built-in list for the sample PDF")
@@ -195,6 +213,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--degradation-success-rate", type=float, default=0.8,
         help="Stop escalating once a level's success rate drops below this",
+    )
+    p.add_argument(
+        "--degradation-delivery-rate", type=float, default=0.5,
+        help="Stop escalating once a level's delivery rate (delivered/requested "
+        "questions, not just non-crashed jobs) drops below this",
     )
     return p.parse_args()
 
@@ -215,13 +238,17 @@ async def main() -> None:
     level_summaries = {}
     sustainable_concurrency = None
 
-    print(f"{'concurrency':<12} {'success_rate':<13} {'p50_s':<8} {'p95_s':<8} {'max_s':<8} {'decode_tps':<11}")
-    print("-" * 65)
+    header = (
+        f"{'concurrency':<12} {'total_req':<10} {'success_rate':<13} {'delivery_rate':<14} "
+        f"{'p50_s':<8} {'p95_s':<8} {'max_s':<8} {'decode_tps':<11}"
+    )
+    print(header)
+    print("-" * len(header))
 
     for concurrency in args.concurrency_levels:
         start_ts = time.time()
         results = await run_level(
-            concurrency=concurrency, total_requests=args.requests_per_level,
+            concurrency=concurrency, requests_per_worker=args.requests_per_worker,
             pdf_path=args.pdf, topics=topics, base_config=base_config,
             top_k_range=(args.min_top_k, args.max_top_k),
         )
@@ -230,7 +257,8 @@ async def main() -> None:
         level_summaries[concurrency] = summary
 
         print(
-            f"{concurrency:<12} {summary['success_rate']:<13} "
+            f"{concurrency:<12} {summary['total_requests']:<10} "
+            f"{summary['success_rate']:<13} {summary['delivery_rate']:<14} "
             f"{summary['latency_p50_s'] or '-':<8} {summary['latency_p95_s'] or '-':<8} "
             f"{summary['latency_max_s'] or '-':<8} {summary['mean_decode_tokens_per_second'] or '-':<11}"
         )
@@ -241,6 +269,13 @@ async def main() -> None:
         degraded = False
         if summary["success_rate"] < args.degradation_success_rate:
             print(f"  -> success rate dropped below {args.degradation_success_rate}, stopping here")
+            degraded = True
+        elif summary["delivery_rate"] < args.degradation_delivery_rate:
+            print(
+                f"  -> delivery rate ({summary['delivery_rate']}) dropped below "
+                f"{args.degradation_delivery_rate} -- jobs are 'succeeding' but not "
+                f"delivering what was asked, stopping here"
+            )
             degraded = True
         elif (
             baseline_p95 and summary["latency_p95_s"]
@@ -268,7 +303,8 @@ async def main() -> None:
     out_path = LOG_DIR / f"load_test_summary_{int(time.time())}.json"
     out_path.write_text(json.dumps({str(k): v for k, v in level_summaries.items()}, indent=2))
     print(f"\nFull per-level summary: {out_path}")
-    print(f"Per-request telemetry (real ttft/decode-tps for every call made during this test): logs/quiz-ingest-events-*.jsonl")
+    print("Per-request telemetry (real ttft/decode-tps for every call made during this test): logs/quiz-ingest-events-*.jsonl")
+    print('If delivery_rate looks low at any level, grep logs/*.jsonl for "event": "parse_failure" to see why (raw model output included).')
 
 
 if __name__ == "__main__":

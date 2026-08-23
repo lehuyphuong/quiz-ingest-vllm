@@ -213,6 +213,42 @@ async def test_faithfulness_verify_does_not_leak_supporting_fact_into_prompt():
     assert verify_call["shared_prefix"] == "the real retrieved context"
 
 
+@pytest.mark.asyncio
+async def test_detect_off_topic_indices_flags_dissimilar_item():
+    from quiz_ingest.generation.topic_filter import detect_off_topic_indices
+    from quiz_ingest.generation.batch_quiz_gen import QuizItem
+    from quiz_ingest.ingest.chunking import Chunk
+
+    items = [
+        QuizItem(index=0, question="on-topic Q", correct_answer="on-topic A", supporting_fact="", distractors=[], source_chunk_ids=[]),
+        QuizItem(index=1, question="off-topic Q about mitochondria", correct_answer="off-topic A", supporting_fact="", distractors=[], source_chunk_ids=[]),
+    ]
+    context_chunks = [Chunk(id=0, text="context about transformers", source="test")]
+
+    # 3 texts embedded in order: item0, item1, context0.
+    # item0 nearly identical direction to context -> high similarity.
+    # item1 orthogonal to context -> near-zero similarity.
+    embed_vectors = [
+        [1.0, 0.01],  # item 0 (on-topic)
+        [0.0, 1.0],   # item 1 (off-topic)
+        [1.0, 0.0],   # context chunk
+    ]
+    backend = FakeBackend(generate_responses=[], embed_vectors=embed_vectors)
+
+    off_topic = await detect_off_topic_indices(
+        backend, items=items, context_chunks=context_chunks, threshold=0.3
+    )
+    assert off_topic == {1}
+
+
+@pytest.mark.asyncio
+async def test_detect_off_topic_indices_empty_inputs_return_empty_set():
+    from quiz_ingest.generation.topic_filter import detect_off_topic_indices
+
+    backend = FakeBackend(generate_responses=[], embed_vectors=[])
+    assert await detect_off_topic_indices(backend, items=[], context_chunks=[]) == set()
+
+
 class FakeDistractorRepairBackend:
     """Returns a canned distractors-batch response on each call, in order --
     used to test repair_duplicate_distractors' retry loop deterministically."""
