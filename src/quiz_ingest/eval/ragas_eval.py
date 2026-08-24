@@ -134,7 +134,15 @@ async def score_faithfulness_and_relevance(
             shared_prefix=shared_prefix,
             item_prompts=verify_prompts,
             schema_hint=_VERIFY_SCHEMA,
-            max_tokens=100 * len(verify_prompts),
+            # 200/item, not 100 -- same class of bug as decompose and
+            # distractors (see their docstrings): a load test found
+            # completion_tokens landing on exact multiples of 100 for
+            # failed verify calls. A verdicts array should be tiny, but
+            # the model sometimes prepends reasoning/commentary the
+            # prompt didn't ask for (the same tendency behind the
+            # trailing-disclaimer parser bug this repo already hit) --
+            # budget for that, not just the minimal expected output.
+            max_tokens=200 * len(verify_prompts),
         )
         telemetries.append(verify_result.telemetry)
         if verify_result.parse_failures:
@@ -160,7 +168,8 @@ async def score_faithfulness_and_relevance(
         shared_prefix=shared_prefix,
         item_prompts=reverse_prompts,
         schema_hint=_REVERSE_Q_SCHEMA,
-        max_tokens=100 * len(items),
+        # 200/item, not 100 -- same reasoning as the verify budget above.
+        max_tokens=200 * len(items),
     )
     telemetries.append(reverse_result.telemetry)
     if reverse_result.parse_failures:

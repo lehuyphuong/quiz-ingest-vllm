@@ -235,16 +235,30 @@ async def run_job_streaming(
             }
             items = assemble_quiz_items(surviving_questions, distractors, dropped, context_chunks)
             if not items:
-                log_parse_failure(
-                    stage="assemble_quiz_items",
-                    raw_text=(
-                        f"[no items survived assembly for this group of {group_size}] "
-                        f"generate_questions raw: {q_raw[:1500]!r} ||| "
-                        f"generate_distractors raw: {d_raw[:1500]!r}"
-                    ),
-                    failed_indices=list(range(group_size)),
-                    total_count=group_size,
-                )
+                # Skip a redundant log entry when generate_distractors
+                # already fully explains the loss (every surviving
+                # question's distractor call failed to parse) -- that
+                # case is already logged above under "generate_distractors";
+                # logging it again here double-counted the same lost
+                # items under two stage names, making failed_count sums
+                # across stages overshoot the real delivered/requested
+                # gap (a real load test showed 37 summed vs. 29 actually
+                # missing). Only log here when assembly lost items for a
+                # DIFFERENT reason (blank question text, a missing
+                # distractor entry not covered by d_failures) that
+                # wouldn't otherwise appear anywhere in the log.
+                fully_explained_by_distractor_failure = len(dropped) >= len(surviving_questions)
+                if not fully_explained_by_distractor_failure:
+                    log_parse_failure(
+                        stage="assemble_quiz_items",
+                        raw_text=(
+                            f"[no items survived assembly for this group of {group_size}] "
+                            f"generate_questions raw: {q_raw[:1500]!r} ||| "
+                            f"generate_distractors raw: {d_raw[:1500]!r}"
+                        ),
+                        failed_indices=list(range(group_size)),
+                        total_count=group_size,
+                    )
                 remaining -= group_size
                 continue
 
