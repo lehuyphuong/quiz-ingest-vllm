@@ -489,6 +489,17 @@ def build_pairs(args: argparse.Namespace) -> list[tuple[dict, dict]]:
     return pairs
 
 
+def _fmt(value) -> str:
+    """None-safe formatting for the summary table -- a candidate with
+    delivery_rate=0.0 legitimately has every mean_* field as None (no
+    delivered items to average), and None does not support width-spec
+    formatting (f"{None:<9}" raises TypeError). Explicit `is None` check,
+    not `or '-'`, since 0.0 is a real, falsy-but-valid value that must
+    NOT be displayed as '-'.
+    """
+    return "-" if value is None else value
+
+
 def print_summary_table(results: list[dict]) -> None:
     header = (
         f"{'gen':<16} {'embed':<18} {'status':<28} {'delivery':<9} "
@@ -499,9 +510,9 @@ def print_summary_table(results: list[dict]) -> None:
     for r in results:
         print(
             f"{r['generation_model']:<16} {r['embedding_model']:<18} {r['status']:<28} "
-            f"{r.get('delivery_rate', '-'):<9} {r.get('mean_faithfulness', '-'):<9} "
-            f"{r.get('mean_answer_relevance', '-'):<10} {r.get('mean_diversity', '-'):<9} "
-            f"{r.get('mean_decode_tokens_per_second', '-'):<11}"
+            f"{_fmt(r.get('delivery_rate')):<9} {_fmt(r.get('mean_faithfulness')):<9} "
+            f"{_fmt(r.get('mean_answer_relevance')):<10} {_fmt(r.get('mean_diversity')):<9} "
+            f"{_fmt(r.get('mean_decode_tokens_per_second')):<11}"
         )
 
 
@@ -539,16 +550,22 @@ async def main() -> None:
     for g, e in pairs:
         print(f"  {g['id']}  x  {e['id']}")
 
+    out_path = LOG_DIR / f"benchmark_models_{int(time.time())}.json"
+    LOG_DIR.mkdir(exist_ok=True)
+
     results = []
     for gen, embed in pairs:
         result = await benchmark_pair(gen, embed, args)
         results.append(result)
+        # Written after EVERY pair, not once at the end -- a crash or
+        # Ctrl-C partway through the sweep (or a bug in print_summary_table,
+        # which happened in a real run: formatting a candidate's None
+        # scores crashed AFTER every pair had already completed, losing
+        # all of them since the file was only written at the very end)
+        # must not lose already-completed pairs' results.
+        out_path.write_text(json.dumps(results, indent=2))
 
     print_summary_table(results)
-
-    out_path = LOG_DIR / f"benchmark_models_{int(time.time())}.json"
-    LOG_DIR.mkdir(exist_ok=True)
-    out_path.write_text(json.dumps(results, indent=2))
     print(f"\nFull results: {out_path}")
     print(f"Per-server startup logs: logs/vllm_gen_*.log, logs/vllm_embed_*.log")
 

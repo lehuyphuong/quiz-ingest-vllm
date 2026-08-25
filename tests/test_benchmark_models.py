@@ -183,6 +183,41 @@ def test_count_thinking_tag_calls_since_counts_only_flagged_calls(tmp_path, monk
 
 
 # ---------------------------------------------------------------------------
+# print_summary_table / _fmt -- regression test for a real crash: a
+# candidate with delivery_rate=0.0 has every mean_* field as None, and
+# formatting None with a width-spec (f"{None:<9}") raises TypeError. This
+# crashed AFTER a full sweep had already run, and (before the ordering fix
+# in main()) would have lost every already-completed pair's results too.
+# ---------------------------------------------------------------------------
+
+def test_fmt_preserves_real_zero_and_converts_none_to_dash():
+    assert benchmark_models._fmt(0.0) == 0.0  # falsy but real -- must NOT become '-'
+    assert benchmark_models._fmt(None) == "-"
+    assert benchmark_models._fmt(0.875) == 0.875
+
+
+def test_print_summary_table_does_not_crash_on_none_scores(capsys):
+    results = [
+        {
+            "generation_model": "granite-4.1-8b", "embedding_model": "qwen3-embed-0.6b",
+            "status": "completed", "delivery_rate": 0.0,
+            "mean_faithfulness": None, "mean_answer_relevance": None,
+            "mean_diversity": None, "mean_decode_tokens_per_second": 83.782,
+        },
+        {
+            "generation_model": "qwen3-4b", "embedding_model": "qwen3-embed-0.6b",
+            "status": "completed", "delivery_rate": 1.0,
+            "mean_faithfulness": 0.921, "mean_answer_relevance": 0.827,
+            "mean_diversity": 0.299, "mean_decode_tokens_per_second": 155.277,
+        },
+    ]
+    benchmark_models.print_summary_table(results)  # must not raise
+    out = capsys.readouterr().out
+    assert "granite-4.1-8b" in out
+    assert "0.921" in out
+
+
+# ---------------------------------------------------------------------------
 # VLLMServerProcess.wait_until_healthy -- state machine, using a real local
 # HTTP server (no actual vLLM needed) so the polling mechanics are genuinely
 # exercised rather than just mocked away.
