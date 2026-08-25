@@ -57,6 +57,18 @@ class CallTelemetry:
     # vllm_client.py's MAX_PLAUSIBLE_DECODE_TOKENS_PER_SECOND for why:
     # a real incident under concurrent client load produced values like
     # 54,642 tok/s on hardware whose real baseline is ~90-100 tok/s.
+    contains_thinking_tags: bool = False  # True if the raw completion
+    # text contains a "<think>" tag. This pipeline calls the raw
+    # /v1/completions endpoint (no chat template), so it's genuinely
+    # unclear whether a hybrid-thinking model (e.g. bare "Qwen3-8B", as
+    # opposed to an explicit "-Instruct-2507" non-thinking checkpoint)
+    # will spontaneously emit a reasoning preamble here -- this flag
+    # lets a benchmark answer that empirically instead of guessing. A
+    # thinking preamble is also a real risk to _parse_json_array_batch:
+    # if the reasoning text contains a stray "[" before the real JSON
+    # array, raw_decode() will try to parse FROM that bracket and fail
+    # the whole batch (the earlier trailing-prose fix only protects
+    # against text AFTER a valid array, not a bad "[" appearing before it).
 
 
 @dataclass

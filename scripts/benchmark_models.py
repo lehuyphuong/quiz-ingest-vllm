@@ -30,14 +30,18 @@ MODEL SELECTION -- reasoning, not just names:
     quantization hurting quality", two different questions.
   - Deliberately spans same-family-different-size (Qwen3-4B vs
     Qwen3-8B) AND different-family-same-size (Qwen3-8B vs GLM-4-9B vs
-    Granite-4.1-8B vs Llama-3.1-8B) -- isolates whether SIZE or TRAINING
-    LINEAGE matters more for this structured-JSON-batch-generation task,
-    which public leaderboards don't tell you (see this repo's earlier
-    model-selection discussion).
-  - "Llama-3.3-8B" is deliberately NOT included: it was never released
-    as open weights by Meta (only reachable through Meta's proprietary
-    Llama API); Llama-3.1-8B-Instruct is the real, downloadable model in
-    that size class and is used instead.
+    Granite-4.1-8B) -- isolates whether SIZE or TRAINING LINEAGE matters
+    more for this structured-JSON-batch-generation task, which public
+    leaderboards don't tell you (see this repo's earlier model-selection
+    discussion).
+  - meta-llama/Meta-Llama-3.1-8B-Instruct was considered but is
+    DELIBERATELY EXCLUDED here: it's gated on HuggingFace (requires
+    requesting access and waiting for approval), and that approval
+    wasn't granted yet at the time this candidate list was set -- add it
+    back to GENERATION_CANDIDATES once access is confirmed, using
+    exactly that repo id (NOT "Llama-3.3-8B", which was never released
+    as open weights by Meta -- only reachable through Meta's proprietary
+    Llama API).
 
 Usage:
     python scripts/benchmark_models.py \
@@ -93,10 +97,13 @@ GENERATION_CANDIDATES = [
         "model": "Qwen/Qwen3-8B",
         "vram_gb": 16,
         "notes": "Same family as baseline, 2x size -- isolates whether size "
-        "alone helps. Verify you're pulling the default/non-thinking variant; "
-        "a -Thinking checkpoint is far more verbose and will need its own "
-        "max_tokens re-tuning (thinking-mode output doesn't fit this repo's "
-        "current budgets at all).",
+        "alone helps. CONFIRMED RISK (not hypothetical): unlike the 4B "
+        "baseline, there is no '-Instruct-2507' non-thinking release at 8B -- "
+        "bare 'Qwen3-8B' is the original hybrid-thinking checkpoint, which "
+        "defaults to thinking mode via chat templates. Whether that triggers "
+        "through this pipeline's raw /v1/completions call (no chat template) "
+        "is unverified -- check the 'thinking_tag_calls' field in this "
+        "candidate's result before trusting its other numbers.",
     },
     {
         "id": "glm4-9b",
@@ -110,12 +117,6 @@ GENERATION_CANDIDATES = [
         "model": "ibm-granite/granite-4.1-8b",
         "vram_gb": 16,
         "notes": "Different lineage, enterprise/tool-calling/RAG-oriented, Apache 2.0.",
-    },
-    {
-        "id": "llama-3.1-8b",
-        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        "vram_gb": 16,
-        "notes": "Safe ecosystem default / widely-used anchor for comparison.",
     },
 ]
 
@@ -255,6 +256,36 @@ def collect_decode_tps_since(start_ts: float) -> list[float]:
     return values
 
 
+def count_thinking_tag_calls_since(start_ts: float) -> int:
+    """
+    Counts api_call events (since start_ts) whose raw output contained a
+    "<think>" tag -- see llm/base.py's contains_thinking_tags docstring.
+    A nonzero count for a candidate means it's spontaneously emitting a
+    reasoning preamble even via this pipeline's raw /v1/completions call
+    (no chat template) -- worth a manual look at that candidate's
+    behavior before trusting its other numbers, since a thinking preamble
+    is also a known risk to the JSON array parser (a stray "[" in the
+    reasoning text can make the whole batch fail to parse).
+    """
+    path = _log_path()
+    if not path.exists():
+        return 0
+    count = 0
+    with open(path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                rec.get("event") == "api_call"
+                and rec.get("ts", 0) >= start_ts
+                and rec.get("contains_thinking_tags")
+            ):
+                count += 1
+    return count
+
+
 async def run_benchmark_workload(
     *, pdf_path: str, topics: list[str], config: PipelineConfig,
     n_jobs: int, num_questions: int, top_k: int,
@@ -286,6 +317,7 @@ async def run_benchmark_workload(
             print(f"    job failed: {exc!r}")
 
     decode_tps_samples = collect_decode_tps_since(start_ts)
+    thinking_tag_calls = count_thinking_tag_calls_since(start_ts)
 
     def _mean(vals):
         vals = [v for v in vals if v is not None]
@@ -303,6 +335,11 @@ async def run_benchmark_workload(
         "mean_decode_tokens_per_second": _mean(decode_tps_samples),
         "latency_mean_s": _mean(wall_times),
         "latency_p50_s": round(statistics.median(wall_times), 2) if wall_times else None,
+        # Nonzero here on a raw-/v1/completions pipeline like this one is
+        # worth a manual look -- see count_thinking_tag_calls_since's
+        # docstring. Most relevant to bare "Qwen3-8B" (hybrid-thinking
+        # default) vs. an explicit "-Instruct-2507" checkpoint.
+        "thinking_tag_calls": thinking_tag_calls,
     }
 
 
@@ -368,6 +405,14 @@ async def benchmark_pair(gen: dict, embed: dict, args: argparse.Namespace) -> di
             f"diversity={result['mean_diversity']}  "
             f"decode_tps={result['mean_decode_tokens_per_second']}"
         )
+        if result.get("thinking_tag_calls"):
+            print(
+                f"    ⚠ {result['thinking_tag_calls']} call(s) contained a <think> "
+                f"tag -- this model is emitting reasoning preambles even via raw "
+                f"/v1/completions. Worth a manual look at "
+                f"logs/quiz-ingest-events-*.jsonl (parse_failure raw_text_excerpt) "
+                f"before trusting this candidate's other numbers."
+            )
     except Exception as exc:  # noqa: BLE001 -- one pair's crash must not kill the whole sweep
         result["status"] = "error"
         result["error"] = repr(exc)

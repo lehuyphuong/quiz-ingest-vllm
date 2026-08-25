@@ -216,6 +216,7 @@ class VLLMClient:
                     retry_count=attempt,
                     hit_token_limit=(completion_tokens >= max_tokens > 0),
                     decode_tps_discarded_as_implausible=decode_tps_discarded,
+                    contains_thinking_tags=("<think>" in full_text),
                 )
                 return full_text, telemetry
 

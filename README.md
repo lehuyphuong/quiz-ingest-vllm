@@ -517,7 +517,7 @@ models only (no multimodal variants, per this repo's earlier Gemma3
 lesson), capped around 8-9B to fit a 24GB card alongside a separate
 embedding process, spanning both same-family-different-size (Qwen3-4B
 vs Qwen3-8B) and different-family-same-size (Qwen3-8B vs GLM-4-9B vs
-Granite-4.1-8B vs Llama-3.1-8B) so you can tell whether size or training
+Granite-4.1-8B) so you can tell whether size or training
 lineage matters more for this specific batched-JSON-generation task --
 public leaderboards don't answer that.
 

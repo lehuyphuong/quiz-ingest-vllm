@@ -116,6 +116,7 @@ async def test_run_benchmark_workload_aggregates_correctly(monkeypatch, tmp_path
 
     monkeypatch.setattr(benchmark_models, "run_job", fake_run_job)
     monkeypatch.setattr(benchmark_models, "collect_decode_tps_since", lambda ts: [90.0, 100.0])
+    monkeypatch.setattr(benchmark_models, "count_thinking_tag_calls_since", lambda ts: 0)
 
     from quiz_ingest.config import PipelineConfig
 
@@ -146,6 +147,7 @@ async def test_run_benchmark_workload_survives_job_failures(monkeypatch):
 
     monkeypatch.setattr(benchmark_models, "run_job", flaky_run_job)
     monkeypatch.setattr(benchmark_models, "collect_decode_tps_since", lambda ts: [])
+    monkeypatch.setattr(benchmark_models, "count_thinking_tag_calls_since", lambda ts: 0)
 
     from quiz_ingest.config import PipelineConfig
 
@@ -159,6 +161,25 @@ async def test_run_benchmark_workload_survives_job_failures(monkeypatch):
     assert result["job_failures"] == 1
     assert result["delivered_total"] == 2  # 2 successful jobs * 1 item each
     assert result["mean_decode_tokens_per_second"] is None  # no samples -- must not fabricate 0.0
+
+
+def test_count_thinking_tag_calls_since_counts_only_flagged_calls(tmp_path, monkeypatch):
+    import json as json_module
+
+    fake_log_dir = tmp_path / "logs"
+    fake_log_dir.mkdir()
+    fake_log_path = fake_log_dir / "quiz-ingest-events-fake.jsonl"
+
+    new_ts = time.time()
+    with open(fake_log_path, "w") as f:
+        f.write(json_module.dumps({"event": "api_call", "ts": new_ts, "contains_thinking_tags": True}) + "\n")
+        f.write(json_module.dumps({"event": "api_call", "ts": new_ts, "contains_thinking_tags": False}) + "\n")
+        f.write(json_module.dumps({"event": "api_call", "ts": new_ts}) + "\n")  # field absent -- must not count
+
+    monkeypatch.setattr(benchmark_models, "_log_path", lambda: fake_log_path)
+
+    count = benchmark_models.count_thinking_tag_calls_since(new_ts - 1)
+    assert count == 1
 
 
 # ---------------------------------------------------------------------------
