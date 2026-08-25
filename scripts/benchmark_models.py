@@ -4,9 +4,12 @@ scripts/benchmark_models.py
 
 Benchmarks multiple (generation model, embedding model) PAIRS against the
 REAL pipeline (pipeline.run_job) -- not a synthetic completion benchmark --
-by managing each pair's vLLM server lifecycle itself: start both servers,
-wait for health, run a fixed workload, tear both down, move to the next
-pair. One combination is loaded on the GPU at a time.
+by managing each pair's vLLM server lifecycle itself: start the
+generation server, wait for it to become healthy, THEN start the
+embedding server and wait for it too (serialized -- see benchmark_pair's
+docstring for why simultaneous startup is a real, observed problem), run
+a fixed workload, tear both down, move to the next pair. One combination
+is loaded on the GPU at a time.
 
 DESIGN: one-factor-at-a-time, not a full cross product. Testing every
 generation model against every embedding model (5 gen x 2 embed = 10
@@ -370,16 +373,33 @@ async def benchmark_pair(gen: dict, embed: dict, args: argparse.Namespace) -> di
     }
     try:
         gen_server.start()
-        embed_server.start()
-        print("    waiting for both servers to become healthy...")
-        gen_ok, embed_ok = await asyncio.gather(
-            gen_server.wait_until_healthy(args.startup_timeout_s),
-            embed_server.wait_until_healthy(args.startup_timeout_s),
-        )
+        print("    waiting for generation server to become healthy...")
+        gen_ok = await gen_server.wait_until_healthy(args.startup_timeout_s)
         if not gen_ok:
             result["status"] = "generation_server_failed_to_start"
             print(f"    FAILED -- see {gen_server.log_path}")
             return result
+
+        # embed_server.start() is deliberately NOT called until gen is
+        # already healthy -- starting both vLLM processes near-
+        # simultaneously caused a real, non-deterministic failure: two
+        # processes racing to initialize CUDA on the same GPU at once.
+        # Observed directly across one sweep: pair 1 and 2's embed
+        # process died silently (0-byte log, no traceback -- a crash at
+        # the CUDA/driver level, before Python-side logging even starts)
+        # within ~3 seconds; pair 3 happened to succeed; pair 4 hung.
+        # Same command, same model, three different symptoms -- the
+        # signature of a startup race, not a deterministic bug in any
+        # one candidate. Serializing startup (one CUDA context fully
+        # established before the next process touches the GPU) trades a
+        # slower sweep for a reliable one.
+        await asyncio.sleep(args.stagger_buffer_s)  # extra margin -- /health
+        # returning 200 confirms the HTTP layer is up, not that every
+        # background CUDA init step (e.g. torch.compile warmup) has
+        # fully settled.
+        embed_server.start()
+        print("    waiting for embedding server to become healthy...")
+        embed_ok = await embed_server.wait_until_healthy(args.startup_timeout_s)
         if not embed_ok:
             result["status"] = "embedding_server_failed_to_start"
             print(f"    FAILED -- see {embed_server.log_path}")
@@ -496,6 +516,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--total-vram-gb", type=float, default=24.0)
     p.add_argument("--startup-timeout-s", type=float, default=600.0)
     p.add_argument("--cooldown-s", type=float, default=15.0)
+    p.add_argument(
+        "--stagger-buffer-s", type=float, default=5.0,
+        help="Extra pause after the generation server passes its health check "
+        "before starting the embedding server -- avoids a CUDA-init race "
+        "condition observed when starting both near-simultaneously.",
+    )
     p.add_argument(
         "--only", nargs="+", default=None,
         help="Restrict to these candidate ids (generation and/or embedding). "

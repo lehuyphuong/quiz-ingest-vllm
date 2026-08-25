@@ -543,3 +543,22 @@ timing, health-check readiness, and OOM behavior have not been verified
 end to end. Run it on your instance and adjust `--startup-timeout-s` /
 `--cooldown-s` if needed -- report back what breaks.
 
+
+## Server startup race condition (fixed)
+
+A real sweep failed 3 different ways across 4 pairs -- pair 1 and 2's
+embedding server died silently (0-byte log, no traceback -- a crash
+below Python's own logging, before even vLLM's startup banner printed)
+within ~3 seconds; pair 3 succeeded; pair 4 hung indefinitely. Same
+command, same model each time -- the signature of a non-deterministic
+race, not a bug in any one candidate. Root cause: `benchmark_pair`
+started both vLLM subprocesses near-simultaneously
+(`gen_server.start(); embed_server.start()`), and two processes racing
+to initialize CUDA on the same GPU at the same time is a known source of
+random crashes/hangs.
+
+Fixed by serializing startup: the generation server must pass its health
+check (plus a `--stagger-buffer-s` extra pause, default 5s, since
+`/health` returning 200 only confirms the HTTP layer is up, not that
+every background CUDA init step like torch.compile warmup has settled)
+before the embedding server is even started. Slower per pair, reliable.
