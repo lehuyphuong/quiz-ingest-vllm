@@ -38,6 +38,16 @@ class VLLMResponseError(RuntimeError):
     """Raised when the server returns a non-2xx status or malformed SSE."""
 
 
+# Generous sanity ceiling for decode_tokens_per_second -- see the
+# discard-and-flag logic in _stream_completion for why this exists (a
+# client-side asyncio scheduling artifact under concurrent load, not a
+# real hardware limit). Set well above any legitimate single-stream
+# throughput for a small-to-mid dense model on a single consumer/
+# workstation GPU; tune upward only if you've confirmed a LEGITIMATE
+# faster setup (e.g. speculative decoding) actually exceeds this.
+MAX_PLAUSIBLE_DECODE_TOKENS_PER_SECOND = 500.0
+
+
 @dataclass
 class VLLMClientConfig:
     base_url: str  # e.g. "http://136.65.146.37:8000" -- no trailing slash
@@ -158,13 +168,41 @@ class VLLMClient:
                 wall_time = time.monotonic() - t_sent
                 ttft = (t_first_token - t_sent) if t_first_token is not None else None
                 decode_tps = None
+                decode_tps_discarded = False
                 if (
                     t_first_token is not None
                     and t_last_token is not None
                     and completion_tokens > 1
                     and t_last_token > t_first_token
                 ):
-                    decode_tps = (completion_tokens - 1) / (t_last_token - t_first_token)
+                    candidate_tps = (completion_tokens - 1) / (t_last_token - t_first_token)
+                    # Sanity ceiling, not a real hardware limit -- this
+                    # client measures inter-chunk time using its OWN
+                    # asyncio task's timestamps. Under high CLIENT-SIDE
+                    # concurrency (many coroutines sharing one event
+                    # loop, e.g. load_test.py at concurrency>=4), a task
+                    # can be starved of scheduling time while tokens sit
+                    # in the OS socket buffer, then drain a burst of
+                    # already-arrived chunks almost instantly once
+                    # scheduled -- t_last-t_first collapses toward zero
+                    # while completion_tokens stays normal, producing
+                    # decode_tps values in the tens of thousands (a real
+                    # incident: 54,642 tok/s logged against a GPU whose
+                    # single-request baseline is ~90-100 tok/s -- not
+                    # possible on this hardware for a 4B model). Discard
+                    # rather than report a fabricated number -- same
+                    # principle as ttft_s=None for non-streaming
+                    # transports: an unreliable measurement must never
+                    # look like a real one. For trustworthy decode
+                    # throughput UNDER concurrent client load, use
+                    # vLLM's own server-side /metrics (Prometheus) --
+                    # immune to this client-side scheduling artifact
+                    # entirely, since it's measured at the GPU, not the
+                    # asyncio event loop.
+                    if candidate_tps <= MAX_PLAUSIBLE_DECODE_TOKENS_PER_SECOND:
+                        decode_tps = candidate_tps
+                    else:
+                        decode_tps_discarded = True
 
                 telemetry = CallTelemetry(
                     call_type="generate_json",
@@ -177,6 +215,7 @@ class VLLMClient:
                     prefix_cache_hit_tokens=prefix_hit_tokens,
                     retry_count=attempt,
                     hit_token_limit=(completion_tokens >= max_tokens > 0),
+                    decode_tps_discarded_as_implausible=decode_tps_discarded,
                 )
                 return full_text, telemetry
 

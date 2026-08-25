@@ -51,6 +51,12 @@ class CallTelemetry:
     # file's docstring for a real incident this would have caught
     # instantly instead of requiring manual completion_tokens-vs-budget
     # cross-referencing across several log entries.
+    decode_tps_discarded_as_implausible: bool = False  # True when a
+    # computed decode_tokens_per_second exceeded a sanity ceiling and was
+    # discarded (decode_tokens_per_second left None instead) -- see
+    # vllm_client.py's MAX_PLAUSIBLE_DECODE_TOKENS_PER_SECOND for why:
+    # a real incident under concurrent client load produced values like
+    # 54,642 tok/s on hardware whose real baseline is ~90-100 tok/s.
 
 
 @dataclass

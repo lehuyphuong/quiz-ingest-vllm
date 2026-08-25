@@ -494,3 +494,52 @@ upgrading, `grep '"event": "parse_failure"' logs/*.jsonl | python3 -c
 "import json,sys,collections; print(collections.Counter(json.loads(l)['stage'] for l in sys.stdin))"`
 now gives a complete stage-by-stage breakdown instead of missing most of
 the loss.
+
+## Benchmarking multiple models (scripts/benchmark_models.py)
+
+```bash
+python scripts/benchmark_models.py \
+    --pdf test_docs/sample.pdf \
+    --jobs-per-pair 8 --num-questions 5
+```
+
+Manages the vLLM server lifecycle itself: starts a generation + embedding
+server pair, waits for both `/health` checks, runs `jobs_per_pair` real
+end-to-end jobs against the actual pipeline (retrieval, batched
+generation, eval, repair, off-topic filtering -- not a synthetic
+completion benchmark), tears both servers down, cools down for GPU
+memory to release, then moves to the next pair. One combination loaded
+at a time.
+
+**Candidates and reasoning** are documented directly in the script
+(`GENERATION_CANDIDATES` / `EMBEDDING_CANDIDATES`) -- text-only dense
+models only (no multimodal variants, per this repo's earlier Gemma3
+lesson), capped around 8-9B to fit a 24GB card alongside a separate
+embedding process, spanning both same-family-different-size (Qwen3-4B
+vs Qwen3-8B) and different-family-same-size (Qwen3-8B vs GLM-4-9B vs
+Granite-4.1-8B vs Llama-3.1-8B) so you can tell whether size or training
+lineage matters more for this specific batched-JSON-generation task --
+public leaderboards don't answer that.
+
+**Design: one-factor-at-a-time, not a full cross product** -- by
+default, every generation candidate is tested against the baseline
+embedding model, and every other embedding candidate is tested against
+the baseline generation model. Use `--only <id> <id>...` to restrict to
+specific candidates (still paired against the relevant baseline, not
+combined with each other), or `--skip-generation-sweep` /
+`--skip-embedding-sweep` to run just one axis.
+
+`--gpu-memory-utilization` for each server is computed automatically
+from the candidate's `vram_gb` estimate (`resolve_gpu_utilization_pair`)
+-- a rough starting point, not exact science; watch `nvidia-smi` on a
+new candidate's first run and adjust `vram_gb` in the candidate table or
+`--total-vram-gb` if a server OOMs.
+
+**Not yet run against real hardware in this environment** -- the
+subprocess start/health-check/teardown mechanics (`VLLMServerProcess`)
+are implemented defensively and unit-tested with a dummy process
+(`tests/test_benchmark_models.py`), but the actual `vllm serve` startup
+timing, health-check readiness, and OOM behavior have not been verified
+end to end. Run it on your instance and adjust `--startup-timeout-s` /
+`--cooldown-s` if needed -- report back what breaks.
+
